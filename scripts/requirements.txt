@@ -1,0 +1,3 @@
+boto3>=1.40,<2
+botocore[crt]>=1.40,<2
+pyicloud==2.6.5

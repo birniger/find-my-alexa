@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Private Alexa skill that queues a Find My sound for one iPhone.
+
+Parameters:
+  AppleId:
+    Type: String
+    NoEcho: true
+    Description: Apple Account email used by the one-time authentication script.
+  DeviceName:
+    Type: String
+    Description: Exact device name shown in Apple Find My.
+  SkillId:
+    Type: String
+    Default: ""
+    Description: Alexa skill ID. Leave empty for the first deploy, then redeploy after creating the skill.
+  SpokenPhoneName:
+    Type: String
+    Default: Basil's phone
+    Description: Name Alexa says after accepting the request.
+
+Conditions:
+  HasSkillId: !Not [!Equals [!Ref SkillId, ""]]
+
+Resources:
+  SessionBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  RingRequestsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  RingRequestsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 300
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RingRequestsDeadLetterQueue.Arn
+        maxReceiveCount: 2
+
+  SkillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/skill/
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+        - arm64
+      MemorySize: 256
+      Timeout: 7
+      Environment:
+        Variables:
+          EXPECTED_SKILL_ID: !Ref SkillId
+          PHONE_SPOKEN_NAME: !Ref SpokenPhoneName
+          RING_QUEUE_URL: !Ref RingRequestsQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt RingRequestsQueue.QueueName
+
+  SkillFunctionAlexaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      EventSourceToken: !If
+        - HasSkillId
+        - !Ref SkillId
+        - !Ref AWS::NoValue
+      FunctionName: !Ref SkillFunction
+      Principal: alexa-appkit.amazon.com
+
+  RingWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/worker/
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+        - arm64
+      MemorySize: 512
+      Timeout: 45
+      Environment:
+        Variables:
+          APPLE_ID: !Ref AppleId
+          DEVICE_NAME: !Ref DeviceName
+          SESSION_BUCKET: !Ref SessionBucket
+          SESSION_PREFIX: session/
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref SessionBucket
+        - S3WritePolicy:
+            BucketName: !Ref SessionBucket
+      Events:
+        RingRequest:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RingRequestsQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
+Outputs:
+  SkillFunctionArn:
+    Description: Paste this ARN into the Alexa custom skill endpoint.
+    Value: !GetAtt SkillFunction.Arn
+  SessionBucketName:
+    Description: Passed to scripts/authenticate.py during one-time Apple authentication.
+    Value: !Ref SessionBucket
+  DeadLetterQueueUrl:
+    Description: Failed ring requests appear here for troubleshooting.
+    Value: !Ref RingRequestsDeadLetterQueue

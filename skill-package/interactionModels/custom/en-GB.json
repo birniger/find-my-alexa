@@ -1,0 +1,32 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "basil phone finder",
+      "intents": [
+        {
+          "name": "RingPhoneIntent",
+          "samples": [
+            "ring the phone",
+            "ring Basil's phone",
+            "find the phone",
+            "find Basil's phone",
+            "where is the phone",
+            "where is Basil's phone"
+          ]
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        }
+      ]
+    }
+  }
+}

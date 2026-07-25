@@ -1,0 +1,14 @@
+.aws-sam/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+session/
+.DS_Store
+.env
+.env.*
+*.cookiejar
+*.session
+target.json
+samconfig.toml
+/skill-package/skill.json

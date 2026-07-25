@@ -1,0 +1,61 @@
+{
+  "vendorId": "YOUR_ALEXA_VENDOR_ID",
+  "manifest": {
+    "manifestVersion": "1.0",
+    "publishingInformation": {
+      "locales": {
+        "en-GB": {
+          "name": "Basil Phone Finder",
+          "summary": "Privately rings Basil's iPhone using Find My.",
+          "description": "A personal development skill that asks Apple's Find My service to play a sound on Basil's iPhone.",
+          "examplePhrases": [
+            "Alexa, open Basil Phone Finder",
+            "Alexa, ask Basil Phone Finder to ring the phone",
+            "Alexa, ask Basil Phone Finder where Basil's phone is"
+          ],
+          "keywords": [
+            "private",
+            "phone",
+            "finder"
+          ]
+        },
+        "en-US": {
+          "name": "Basil Phone Finder",
+          "summary": "Privately rings Basil's iPhone using Find My.",
+          "description": "A personal development skill that asks Apple's Find My service to play a sound on Basil's iPhone.",
+          "examplePhrases": [
+            "Alexa, open Basil Phone Finder",
+            "Alexa, ask Basil Phone Finder to ring the phone",
+            "Alexa, ask Basil Phone Finder where Basil's phone is"
+          ],
+          "keywords": [
+            "private",
+            "phone",
+            "finder"
+          ]
+        }
+      },
+      "isAvailableWorldwide": false,
+      "testingInstructions": "Personal development skill; do not certify or publish.",
+      "category": "ORGANIZERS_AND_ASSISTANTS",
+      "distributionCountries": [
+        "CH"
+      ]
+    },
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "YOUR_SKILL_FUNCTION_ARN"
+        },
+        "interfaces": []
+      }
+    },
+    "privacyAndCompliance": {
+      "allowsPurchases": false,
+      "usesPersonalInfo": false,
+      "isChildDirected": false,
+      "isExportCompliant": true,
+      "containsAds": false
+    }
+  }
+}
