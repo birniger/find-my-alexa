@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
+from typing import Any
+
+
+HTTP_TIMEOUT = (5.0, 12.0)
 
 
 class ReauthenticationRequired(RuntimeError):
@@ -13,6 +18,36 @@ class ReauthenticationRequired(RuntimeError):
 
 class DeviceNotFound(RuntimeError):
     """The configured device was not returned by Find My."""
+
+
+class MonitorShutdownError(RuntimeError):
+    """The pyicloud background monitor did not stop safely."""
+
+
+def _install_http_timeout(api: Any) -> None:
+    """Apply a bounded default to every request made by this pyicloud session."""
+    original_request = api.session.request
+
+    def request_with_timeout(method, url, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = HTTP_TIMEOUT
+        return original_request(method, url, **kwargs)
+
+    api.session.request = request_with_timeout
+
+
+def _stop_device_monitor(manager: Any) -> None:
+    """Stop pyicloud 2.6.5's private daemon monitor before returning to Lambda."""
+    stop_event = getattr(manager, "stop_event", None)
+    monitor = getattr(manager, "_monitor", None)
+    if stop_event is None and monitor is None:
+        return
+    if stop_event is not None:
+        stop_event.set()
+    if monitor is not None:
+        monitor.join(timeout=1.0)
+        if monitor.is_alive():
+            raise MonitorShutdownError("The Find My background monitor did not stop")
 
 
 def _normalise_name(value: str) -> str:
@@ -40,6 +75,9 @@ def ring_device(apple_id: str, target_name: str, session_directory: Path) -> Non
     Authentication is intentionally disabled. If the cached token has expired,
     the worker fails instead of attempting a login with a password stored in AWS.
     """
+    # Third-party diagnostics can contain account or HTTP response details.
+    logging.getLogger("pyicloud").setLevel(logging.CRITICAL)
+
     from pyicloud import PyiCloudService
 
     api = PyiCloudService(
@@ -49,31 +87,39 @@ def ring_device(apple_id: str, target_name: str, session_directory: Path) -> Non
         with_family=False,
         authenticate=False,
     )
+    _install_http_timeout(api)
     auth_status = api.get_auth_status()
     if not auth_status.get("authenticated") or auth_status.get("requires_2fa"):
         raise ReauthenticationRequired(
             "The iCloud session expired; rerun scripts/authenticate.py"
         )
 
-    target_id = _configured_device_id(session_directory)
-    if target_id:
-        matches = [
-            device
-            for device in api.devices
-            if str(device.data.get("id") or "") == target_id
-        ]
-    else:
-        # Backward-compatible fallback for sessions created before target.json.
-        wanted = _normalise_name(target_name)
-        matches = []
-        for device in api.devices:
-            name = str(device.status().get("name") or "")
-            if _normalise_name(name) == wanted:
-                matches.append(device)
+    manager = api.devices
+    try:
+        devices = list(manager)
+        target_id = _configured_device_id(session_directory)
+        if target_id:
+            matches = [
+                device
+                for device in devices
+                if str(device.data.get("id") or "") == target_id
+            ]
+        else:
+            # Backward-compatible fallback for sessions created before target.json.
+            wanted = _normalise_name(target_name)
+            matches = []
+            for device in devices:
+                name = str(device.status().get("name") or "")
+                if _normalise_name(name) == wanted:
+                    matches.append(device)
 
-    if len(matches) != 1:
-        raise DeviceNotFound(
-            "The configured Find My device was not returned exactly once"
-        )
+        if len(matches) != 1:
+            raise DeviceNotFound(
+                "The configured Find My device was not returned exactly once"
+            )
 
-    matches[0].play_sound(subject="Find My alert requested through Alexa")
+        matches[0].play_sound(subject="Find My alert requested through Alexa")
+    finally:
+        # Device properties can restart pyicloud's daemon monitor, so stop and
+        # join it only after every Find My operation has finished.
+        _stop_device_monitor(manager)

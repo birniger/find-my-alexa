@@ -49,9 +49,9 @@ Alexa Routine: “where's Basil's phone?”
 ```
 
 The skill does not store an Apple password. `scripts/authenticate.py` asks for
-it locally, completes Apple 2FA, and uploads only the resulting session,
-cookie files, and the selected device's internal identifier to the private S3
-bucket. When that session expires, rerun the script.
+it locally, completes Apple 2FA, and uploads one encrypted-at-rest ZIP containing
+only the resulting session, cookie file, and selected device's internal
+identifier to the private S3 bucket. When that session expires, rerun the script.
 
 ## Prerequisites
 
@@ -118,18 +118,22 @@ gitignored `skill-package/skill.json`, then replace `YOUR_ALEXA_VENDOR_ID` and
 ## 3. Lock Lambda to the skill ID
 
 Redeploy with the exact skill ID. Keep the same Apple ID and device name used
-for the first deployment:
+for the first deployment. Preserve the literal double quotes shown below:
+SAM parses the parameter list a second time, and the inner quotes protect
+values containing spaces or apostrophes.
 
 ```sh
 sam deploy \
+  --template-file .aws-sam/build/template.yaml \
   --stack-name find-my-alexa \
   --region eu-west-1 \
   --capabilities CAPABILITY_IAM \
+  --resolve-s3 \
   --parameter-overrides \
-    AppleId='YOUR_APPLE_ACCOUNT_EMAIL' \
-    DeviceName='Basil’s iPhone' \
-    SkillId='amzn1.ask.skill.REPLACE_ME' \
-    SpokenPhoneName="Basil's phone"
+    AppleId=\"YOUR_APPLE_ACCOUNT_EMAIL\" \
+    DeviceName=\"Basil’s iPhone\" \
+    SkillId=\"amzn1.ask.skill.REPLACE_ME\" \
+    SpokenPhoneName=\"Basil's phone\"
 ```
 
 This adds the Lambda resource permission for that one Alexa skill and makes the
@@ -155,6 +159,11 @@ end-to-end Apple test:
   --device-name 'Basil’s iPhone' \
   --test-ring
 ```
+
+If multiple devices have the same name, the script shows safe model and battery
+details. It uploads the selection only after you confirm that the intended
+device rang. The three session components are uploaded as one object, so a
+failed upload cannot leave a mismatched session and cookie pair.
 
 Start with an Apple app-specific password. If Apple rejects it for Find My, the
 undocumented endpoint may require the primary Apple Account password. In either
@@ -211,8 +220,11 @@ Apple decides when trusted sessions expire. If Alexa acknowledges but the phone
 does not ring:
 
 1. Inspect the `RingWorkerFunction` CloudWatch log. Errors intentionally contain
-   no Apple IDs, device IDs, locations, cookies, or passwords.
-2. Check the `DeadLetterQueueUrl` stack output for a failed request.
+   no Apple IDs, device IDs, locations, cookies, passwords, or raw Apple
+   responses.
+2. Check the `DeadLetterAlarmName` and `DeadLetterQueueUrl` stack outputs for a
+   failed request. The alarm changes state when a request reaches the queue; add
+   an SNS notification action in AWS if you want email or push notification.
 3. Rerun step 4 to replace the session in S3.
 
 No AWS redeployment is needed for session renewal.
@@ -221,15 +233,29 @@ No AWS redeployment is needed for session renewal.
 
 - The Apple password and 2FA code never enter Alexa or AWS.
 - The session bucket blocks public access, uses server-side encryption and
-  versioning, and is retained if the stack is deleted.
+  versioning, and is retained if the stack is deleted. Superseded session
+  versions expire after one day.
 - Only the worker Lambda role can read and update the session bucket.
 - Only the skill Lambda can send ring messages.
 - The skill Lambda validates the exact Alexa skill ID.
 - Device selection is a locally confirmed, encrypted device-ID allowlist, not
   a spoken slot. Duplicate Find My names are supported.
 - The worker never automatically authenticates with a stored password.
+- Apple HTTP requests have connect/read limits and a total deadline that leaves
+  time for cleanup before Lambda's hard timeout.
+- The pyicloud background refresh monitor is stopped before the worker returns,
+  preventing activity from leaking into later warm Lambda invocations.
+- The worker deletes downloaded session material from Lambda `/tmp` after every
+  attempt, including failures.
+- Session refreshes replace one versioned S3 bundle atomically. Deployments from
+  before this format are migrated after their next successful ring.
 - The FIFO queue uses one message group, avoiding concurrent writes to the
-  session without reserving account-wide Lambda capacity.
+  session without reserving account-wide Lambda capacity. Its visibility
+  timeout exceeds six times the worker timeout to avoid premature redelivery.
+
+SQS delivery and Apple's sound request cannot form one transaction. If Apple
+accepts the sound but the network response is lost, SQS may retry and the phone
+may ring twice. This is preferable here to silently losing transient requests.
 
 The retained S3 session is sensitive. If this experiment is retired, empty and
 delete the session bucket manually after deleting the stack.
@@ -240,4 +266,6 @@ The unit tests do not contact Apple, Alexa, or AWS:
 
 ```sh
 python3 -m unittest discover -s tests -v
+sam validate --lint --template-file template.yaml
+sam build --template-file template.yaml
 ```

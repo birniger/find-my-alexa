@@ -5,8 +5,8 @@ iCloud cookie, authenticated session, selected device ID, AWS account ID,
 Alexa skill ID, or deployed Lambda ARN.
 
 Keep `skill-package/skill.json`, `samconfig.toml`, `.env` files, session files,
-cookie jars, and `target.json` private. The supplied `.gitignore` excludes
-these paths and file types.
+cookie jars, `target.json`, and `session-bundle.zip` private. The supplied
+`.gitignore` excludes these paths and file types.
 
 If an iCloud session is ever exposed, delete it from the deployment bucket,
 sign out relevant browser sessions from the Apple Account security page, and
