@@ -73,6 +73,21 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(api.two_factor_delivery_method, "trusted_device")
         self.assertEqual(api.validated_code, "123456")
 
+    def test_duplicate_device_selection_uses_numbered_choice(self):
+        first = object()
+        second = object()
+        with (
+            patch("builtins.input", return_value="2"),
+            patch.object(self.auth, "_safe_device_summary", return_value="iPhone"),
+        ):
+            selected = self.auth._select_device([first, second])
+        self.assertIs(selected, second)
+
+    def test_unconfirmed_test_ring_aborts_before_upload(self):
+        with patch("builtins.input", return_value="no"):
+            with self.assertRaises(SystemExit):
+                self.auth._confirm_test_ring()
+
 
 if __name__ == "__main__":
     unittest.main()

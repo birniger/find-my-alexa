@@ -118,18 +118,22 @@ gitignored `skill-package/skill.json`, then replace `YOUR_ALEXA_VENDOR_ID` and
 ## 3. Lock Lambda to the skill ID
 
 Redeploy with the exact skill ID. Keep the same Apple ID and device name used
-for the first deployment:
+for the first deployment. Preserve the literal double quotes shown below:
+SAM parses the parameter list a second time, and the inner quotes protect
+values containing spaces or apostrophes.
 
 ```sh
 sam deploy \
+  --template-file .aws-sam/build/template.yaml \
   --stack-name find-my-alexa \
   --region eu-west-1 \
   --capabilities CAPABILITY_IAM \
+  --resolve-s3 \
   --parameter-overrides \
-    AppleId='YOUR_APPLE_ACCOUNT_EMAIL' \
-    DeviceName='Basil’s iPhone' \
-    SkillId='amzn1.ask.skill.REPLACE_ME' \
-    SpokenPhoneName="Basil's phone"
+    AppleId=\"YOUR_APPLE_ACCOUNT_EMAIL\" \
+    DeviceName=\"Basil’s iPhone\" \
+    SkillId=\"amzn1.ask.skill.REPLACE_ME\" \
+    SpokenPhoneName=\"Basil's phone\"
 ```
 
 This adds the Lambda resource permission for that one Alexa skill and makes the
@@ -155,6 +159,10 @@ end-to-end Apple test:
   --device-name 'Basil’s iPhone' \
   --test-ring
 ```
+
+If multiple devices have the same name, the script shows safe model and battery
+details. It uploads the selection only after you confirm that the intended
+device rang.
 
 Start with an Apple app-specific password. If Apple rejects it for Find My, the
 undocumented endpoint may require the primary Apple Account password. In either
@@ -221,15 +229,19 @@ No AWS redeployment is needed for session renewal.
 
 - The Apple password and 2FA code never enter Alexa or AWS.
 - The session bucket blocks public access, uses server-side encryption and
-  versioning, and is retained if the stack is deleted.
+  versioning, and is retained if the stack is deleted. Superseded session
+  versions expire after one day.
 - Only the worker Lambda role can read and update the session bucket.
 - Only the skill Lambda can send ring messages.
 - The skill Lambda validates the exact Alexa skill ID.
 - Device selection is a locally confirmed, encrypted device-ID allowlist, not
   a spoken slot. Duplicate Find My names are supported.
 - The worker never automatically authenticates with a stored password.
+- The worker deletes downloaded session material from Lambda `/tmp` after every
+  attempt, including failures.
 - The FIFO queue uses one message group, avoiding concurrent writes to the
-  session without reserving account-wide Lambda capacity.
+  session without reserving account-wide Lambda capacity. Its visibility
+  timeout exceeds six times the worker timeout to avoid premature redelivery.
 
 The retained S3 session is sensitive. If this experiment is retired, empty and
 delete the session bucket manually after deleting the stack.

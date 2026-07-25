@@ -17,26 +17,34 @@ class S3SessionStore:
         bucket: str,
         prefix: str = "session/",
         local_directory: Path = Path("/tmp/find-my-alexa-session"),
+        client=None,
     ) -> None:
         self.bucket = bucket
         self.prefix = prefix.rstrip("/") + "/"
         self.local_directory = local_directory
+        self._client = client
 
     @property
     def client(self):
         # boto3 is provided by the AWS Lambda runtime.
-        import boto3
+        if self._client is None:
+            import boto3
 
-        return boto3.client("s3")
+            self._client = boto3.client("s3")
+        return self._client
+
+    def _resolved_local_directory(self) -> Path:
+        directory = self.local_directory.resolve(strict=False)
+        temporary_root = Path("/tmp").resolve(strict=False)
+        if directory == temporary_root or temporary_root not in directory.parents:
+            raise SessionStoreError("Refusing to use an unsafe local session path")
+        return directory
 
     def download(self) -> Path:
-        if self.local_directory == Path("/") or not str(self.local_directory).startswith(
-            "/tmp/"
-        ):
-            raise SessionStoreError("Refusing to use an unsafe local session path")
+        directory = self._resolved_local_directory()
 
-        shutil.rmtree(self.local_directory, ignore_errors=True)
-        self.local_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        shutil.rmtree(directory, ignore_errors=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         paginator = self.client.get_paginator("list_objects_v2")
         found_session = False
@@ -54,7 +62,7 @@ class S3SessionStore:
                 ):
                     continue
                 self.client.download_file(
-                    self.bucket, key, str(self.local_directory / filename)
+                    self.bucket, key, str(directory / filename)
                 )
                 found_session = found_session or filename.endswith(".session")
                 found_cookiejar = found_cookiejar or filename.endswith(".cookiejar")
@@ -65,11 +73,12 @@ class S3SessionStore:
                 "No complete iCloud session and device selection were found. "
                 "Run scripts/authenticate.py."
             )
-        return self.local_directory
+        return directory
 
     def upload(self) -> None:
+        directory = self._resolved_local_directory()
         uploaded = 0
-        for path in self.local_directory.iterdir():
+        for path in directory.iterdir():
             if not path.is_file() or not path.name.endswith((".session", ".cookiejar")):
                 continue
             self.client.upload_file(
@@ -81,3 +90,7 @@ class S3SessionStore:
             uploaded += 1
         if uploaded < 2:
             raise SessionStoreError("pyicloud did not produce a complete session")
+
+    def cleanup(self) -> None:
+        """Remove downloaded credentials from the Lambda temporary filesystem."""
+        shutil.rmtree(self._resolved_local_directory(), ignore_errors=True)

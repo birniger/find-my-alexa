@@ -23,20 +23,23 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         bucket=os.environ["SESSION_BUCKET"],
         prefix=os.environ.get("SESSION_PREFIX", "session/"),
     )
-    session_directory = store.download()
-
-    ring_device(
-        apple_id=os.environ["APPLE_ID"],
-        target_name=os.environ["DEVICE_NAME"],
-        session_directory=session_directory,
-    )
-
-    # Persist refreshed cookies after a successful operation. Failure here is
-    # logged but must not cause SQS to retry and ring the phone twice.
     try:
-        store.upload()
-    except Exception as exc:  # noqa: BLE001
-        print(f"Session refresh upload failed: {type(exc).__name__}")
+        session_directory = store.download()
+
+        ring_device(
+            apple_id=os.environ["APPLE_ID"],
+            target_name=os.environ["DEVICE_NAME"],
+            session_directory=session_directory,
+        )
+
+        # Persist refreshed cookies after a successful operation. Failure here
+        # is logged but must not cause SQS to retry and ring the phone twice.
+        try:
+            store.upload()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Session refresh upload failed: {type(exc).__name__}")
+    finally:
+        store.cleanup()
 
     print("Find My sound request completed")
     return {"processed": 1}

@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Compile Python
+        run: python -m compileall -q backend scripts tests
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate JSON files
+        run: |
+          python -m json.tool skill-package/skill.example.json >/dev/null
+          python -m json.tool skill-package/interactionModels/custom/en-GB.json >/dev/null
+          python -m json.tool skill-package/interactionModels/custom/en-US.json >/dev/null

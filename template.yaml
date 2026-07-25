@@ -25,13 +25,22 @@ Conditions:
 Resources:
   SessionBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldSessionVersions
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -53,8 +62,8 @@ Resources:
     Properties:
       FifoQueue: true
       ContentBasedDeduplication: true
-      VisibilityTimeout: 60
-      MessageRetentionPeriod: 300
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 900
       SqsManagedSseEnabled: true
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt RingRequestsDeadLetterQueue.Arn

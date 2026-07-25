@@ -79,6 +79,14 @@ def _select_device(matches):
     raise AssertionError("unreachable")
 
 
+def _confirm_test_ring() -> None:
+    confirmation = input("Did the intended device ring? [y/N]: ").strip().casefold()
+    if confirmation not in {"y", "yes"}:
+        raise SystemExit(
+            "Device selection was not confirmed; no session was uploaded"
+        )
+
+
 def _complete_2fa(api) -> None:
     from pyicloud.exceptions import (
         PyiCloudNoTrustedNumberAvailable,
@@ -199,6 +207,7 @@ def main() -> None:
                     subject="Find My Alexa authentication test"
                 )
                 print(f"Sent one test sound to {args.device_name}")
+                _confirm_test_ring()
 
             target_path = Path(directory) / "target.json"
             target_path.write_text(
@@ -206,9 +215,6 @@ def main() -> None:
                     {
                         "version": 1,
                         "device_id": device_id,
-                        "device_name": str(
-                            selected_device.status().get("name") or ""
-                        ),
                     },
                     separators=(",", ":"),
                 ),

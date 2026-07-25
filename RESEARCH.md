@@ -71,28 +71,43 @@ Use a **personal AWS account**, even though the interaction is still an Alexa sk
         private Alexa Custom Skill
                     │
                     ▼
-          Lambda in eu-west-1
+       fast Lambda in eu-west-1
                     │
-                    ├── Secrets Manager: Apple app-specific password
-                    ├── encrypted S3: iCloud session/cookies
-                    └── pyicloud: device allowlist + play_sound()
+                    ▼
+            encrypted FIFO SQS
+                    │
+                    ▼
+      worker Lambda using pyicloud
+                    │
+                    ├── encrypted S3: session/cookies
+                    ├── encrypted selected device ID
+                    └── Find My play_sound()
 ```
 
-Why not put everything in the simplified Alexa-hosted resources? Alexa-hosted skills provision Lambda, S3, and DynamoDB, but not a dedicated secret store. Amazon supports attaching personal AWS resources when additional services are needed:
+The Apple password and 2FA code should be entered only into a local setup
+utility. Upload the resulting trusted session, not the password. The queue lets
+Alexa respond within its deadline while the slower iCloud request runs in the
+background.
+
+Why not put everything in the simplified Alexa-hosted resources? Personal AWS
+resources make it easier to provision a private encrypted session bucket, a
+FIFO worker queue, explicit IAM policies, and lifecycle controls:
 
 - [Amazon: Use personal AWS resources with an Alexa-hosted skill](https://www.developer.amazon.com/en-US/docs/alexa/hosted-skills/alexa-hosted-skills-personal-aws.html)
 
-An app-specific Apple password is preferable to storing the primary Apple Account password. Apple lets it be revoked independently, though changing the primary password revokes all app-specific passwords:
+An app-specific Apple password is preferable during local setup if Find My
+accepts it. Apple lets it be revoked independently, though changing the primary
+password revokes all app-specific passwords:
 
 - [Apple: App-specific passwords](https://support.apple.com/en-ie/102654)
 
 Implementation requirements:
 
-- Allowlist exact devices and friendly spoken aliases. Never accept arbitrary device IDs.
-- Store the credential in Secrets Manager and the mutable authenticated session in encrypted S3.
+- Select one exact device locally and encrypt its stable device ID in S3.
+- Store no Apple password in AWS.
 - Never log credentials, cookies, device IDs, locations, or raw iCloud responses.
-- Keep the iCloud session warm on a schedule; Alexa requires a full custom-skill response in about eight seconds.
-- If authentication expires, fail safely and require a local/admin reauthentication command. Never request an Apple password or 2FA code by voice.
+- Queue iCloud work so Alexa can answer within its response deadline.
+- If authentication expires, fail safely and require local reauthentication. Never request an Apple password or 2FA code by voice.
 - Restrict the Lambda permission to the exact Alexa Skill ID.
 - Use a dedicated Apple Account if practical, with Family Sharing access only to the device(s) that must ring, to reduce blast radius.
 - Treat AirPods/Beats as test-dependent even though Apple supports them on iCloud.com; device results returned by the private API can vary.
