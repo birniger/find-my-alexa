@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import io
 import json
 import re
 import tempfile
+import zipfile
 from pathlib import Path
+
+
+SESSION_BUNDLE_NAME = "session-bundle.zip"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -85,6 +90,31 @@ def _confirm_test_ring() -> None:
         raise SystemExit(
             "Device selection was not confirmed; no session was uploaded"
         )
+
+
+def _stop_device_monitor(manager) -> None:
+    """Stop pyicloud's daemon refresh monitor before uploading session files."""
+    stop_event = getattr(manager, "stop_event", None)
+    monitor = getattr(manager, "_monitor", None)
+    if stop_event is None and monitor is None:
+        return
+    if stop_event is not None:
+        stop_event.set()
+    if monitor is not None:
+        monitor.join(timeout=1.0)
+        if monitor.is_alive():
+            raise SystemExit("The Find My background monitor did not stop safely")
+
+
+def _create_session_bundle(paths: list[Path]) -> io.BytesIO:
+    bundle = io.BytesIO()
+    with zipfile.ZipFile(bundle, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            if not path.is_file():
+                raise SystemExit(f"pyicloud did not create {path.name}")
+            archive.write(path, arcname=path.name)
+    bundle.seek(0)
+    return bundle
 
 
 def _complete_2fa(api) -> None:
@@ -180,46 +210,56 @@ def main() -> None:
         _complete_2fa(api)
 
         # Force Find My initialization and show names only, never IDs or locations.
-        devices = list(api.devices)
-        device_names = [str(device.status().get("name") or "") for device in devices]
-        print("Find My devices:")
-        for name in sorted(device_names, key=str.casefold):
-            print(f"  - {name}")
-
-        if args.device_name:
-            matches = [
-                device
-                for device in devices
-                if _normalise_name(str(device.status().get("name") or ""))
-                == _normalise_name(args.device_name)
+        manager = api.devices
+        try:
+            devices = list(manager)
+            device_names = [
+                str(device.status().get("name") or "") for device in devices
             ]
-            if not matches:
-                raise SystemExit(
-                    "--device-name did not match a Find My device"
-                )
-            selected_device = _select_device(matches)
-            device_id = str(selected_device.data.get("id") or "")
-            if not device_id:
-                raise SystemExit("Apple did not return an ID for the selected device")
+            print("Find My devices:")
+            for name in sorted(device_names, key=str.casefold):
+                print(f"  - {name}")
 
-            if args.test_ring:
-                selected_device.play_sound(
-                    subject="Find My Alexa authentication test"
-                )
-                print(f"Sent one test sound to {args.device_name}")
-                _confirm_test_ring()
+            if args.device_name:
+                matches = [
+                    device
+                    for device in devices
+                    if _normalise_name(str(device.status().get("name") or ""))
+                    == _normalise_name(args.device_name)
+                ]
+                if not matches:
+                    raise SystemExit(
+                        "--device-name did not match a Find My device"
+                    )
+                selected_device = _select_device(matches)
+                device_id = str(selected_device.data.get("id") or "")
+                if not device_id:
+                    raise SystemExit(
+                        "Apple did not return an ID for the selected device"
+                    )
 
-            target_path = Path(directory) / "target.json"
-            target_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "device_id": device_id,
-                    },
-                    separators=(",", ":"),
-                ),
-                encoding="utf-8",
-            )
+                if args.test_ring:
+                    selected_device.play_sound(
+                        subject="Find My Alexa authentication test"
+                    )
+                    print(f"Sent one test sound to {args.device_name}")
+                    _confirm_test_ring()
+
+                target_path = Path(directory) / "target.json"
+                target_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "device_id": device_id,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+        finally:
+            # Device properties can restart the monitor, so stop it only after
+            # selection and the optional test sound are fully complete.
+            _stop_device_monitor(manager)
 
         session_files = [
             Path(api.session.session_path),
@@ -227,15 +267,25 @@ def main() -> None:
             Path(directory) / "target.json",
         ]
         s3 = boto3.client("s3", region_name=args.region)
-        for path in session_files:
-            if not path.is_file():
-                raise SystemExit(f"pyicloud did not create {path.name}")
-            s3.upload_file(
-                str(path),
-                bucket,
-                f"session/{path.name}",
-                ExtraArgs={"ServerSideEncryption": "AES256"},
-            )
+        s3.upload_fileobj(
+            _create_session_bundle(session_files),
+            bucket,
+            f"session/{SESSION_BUNDLE_NAME}",
+            ExtraArgs={"ServerSideEncryption": "AES256"},
+        )
+
+        # Remove pre-bundle objects only after the atomic bundle is durable,
+        # and avoid adding fresh delete markers on later renewals.
+        legacy_keys = {f"session/{path.name}" for path in session_files}
+        existing_keys = {
+            item["Key"]
+            for item in s3.list_objects_v2(
+                Bucket=bucket,
+                Prefix="session/",
+            ).get("Contents", [])
+        }
+        for key in legacy_keys & existing_keys:
+            s3.delete_object(Bucket=bucket, Key=key)
 
     print("Uploaded the trusted iCloud session. The Apple password was not stored.")
 

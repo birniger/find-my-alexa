@@ -69,6 +69,23 @@ Resources:
         deadLetterTargetArn: !GetAtt RingRequestsDeadLetterQueue.Arn
         maxReceiveCount: 2
 
+  RingRequestsDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Find My Alexa requests are waiting in the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt RingRequestsDeadLetterQueue.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
   SkillFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -120,6 +137,11 @@ Resources:
             BucketName: !Ref SessionBucket
         - S3WritePolicy:
             BucketName: !Ref SessionBucket
+        - Statement:
+            - Sid: DeleteMigratedLegacySessionObjects
+              Effect: Allow
+              Action: s3:DeleteObject
+              Resource: !Sub "${SessionBucket.Arn}/session/*"
       Events:
         RingRequest:
           Type: SQS
@@ -138,3 +160,6 @@ Outputs:
   DeadLetterQueueUrl:
     Description: Failed ring requests appear here for troubleshooting.
     Value: !Ref RingRequestsDeadLetterQueue
+  DeadLetterAlarmName:
+    Description: Alarm that changes state when a ring request reaches the dead-letter queue.
+    Value: !Ref RingRequestsDeadLetterAlarm

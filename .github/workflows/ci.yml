@@ -15,10 +15,17 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
+      - uses: aws-actions/setup-sam@f84ec7d548307efafe33230528756de3c5841a17 # v2
+        with:
+          version: "1.164.0"
       - name: Compile Python
         run: python -m compileall -q backend scripts tests
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
+      - name: Validate infrastructure
+        run: sam validate --lint --template-file template.yaml
+      - name: Build deployable artifacts
+        run: sam build --template-file template.yaml
       - name: Validate JSON files
         run: |
           python -m json.tool skill-package/skill.example.json >/dev/null

@@ -10,5 +10,6 @@ session/
 *.cookiejar
 *.session
 target.json
+session-bundle.zip
 samconfig.toml
 /skill-package/skill.json

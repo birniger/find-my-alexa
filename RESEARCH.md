@@ -79,7 +79,7 @@ Use a **personal AWS account**, even though the interaction is still an Alexa sk
                     ▼
       worker Lambda using pyicloud
                     │
-                    ├── encrypted S3: session/cookies
+                    ├── encrypted S3: atomic session bundle
                     ├── encrypted selected device ID
                     └── Find My play_sound()
 ```
@@ -106,6 +106,9 @@ Implementation requirements:
 - Select one exact device locally and encrypt its stable device ID in S3.
 - Store no Apple password in AWS.
 - Never log credentials, cookies, device IDs, locations, or raw iCloud responses.
+- Stop pyicloud's background Find My monitor before the worker returns, and
+  bound Apple HTTP calls below the Lambda timeout.
+- Persist the session, cookies, and device selection as one atomic S3 object.
 - Queue iCloud work so Alexa can answer within its response deadline.
 - If authentication expires, fail safely and require local reauthentication. Never request an Apple password or 2FA code by voice.
 - Restrict the Lambda permission to the exact Alexa Skill ID.

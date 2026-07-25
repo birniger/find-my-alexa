@@ -1,9 +1,12 @@
 import importlib.util
+import io
 import sys
+import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +90,36 @@ class AuthenticationTests(unittest.TestCase):
         with patch("builtins.input", return_value="no"):
             with self.assertRaises(SystemExit):
                 self.auth._confirm_test_ring()
+
+    def test_session_bundle_contains_exactly_the_required_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [
+                Path(directory, "account.session"),
+                Path(directory, "account.cookiejar"),
+                Path(directory, "target.json"),
+            ]
+            for path in paths:
+                path.write_text(path.name, encoding="utf-8")
+
+            bundle = self.auth._create_session_bundle(paths)
+
+        with zipfile.ZipFile(io.BytesIO(bundle.read())) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {"account.session", "account.cookiejar", "target.json"},
+            )
+
+    def test_local_authentication_monitor_is_stopped(self):
+        manager = types.SimpleNamespace(
+            stop_event=Mock(),
+            _monitor=Mock(),
+        )
+        manager._monitor.is_alive.return_value = False
+
+        self.auth._stop_device_monitor(manager)
+
+        manager.stop_event.set.assert_called_once_with()
+        manager._monitor.join.assert_called_once_with(timeout=1.0)
 
 
 if __name__ == "__main__":
