@@ -5,10 +5,14 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import signal
+import urllib.error
+import urllib.request
+from pathlib import Path
 from typing import Any
 
-from find_my import DeviceNotFound, ReauthenticationRequired, ring_device
+from find_my import DeviceNotFound, ReauthenticationRequired, check_device, ring_device
 from session_store import S3SessionStore, SessionStoreError
 
 
@@ -30,6 +34,65 @@ def _failure_category(exc: Exception) -> str:
     if isinstance(exc, WorkerOperationDeadline):
         return "operation_deadline"
     return "operation_failed"
+
+
+def _message_value(
+    message: dict[str, Any],
+    key: str,
+    *,
+    env_key: str | None = None,
+    default: str = "",
+    max_length: int = 500,
+) -> str:
+    value = message.get(key)
+    if value is None and env_key:
+        value = os.environ.get(env_key)
+    if value is None:
+        value = default
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {key}")
+    value = value.strip()
+    if not value or len(value) > max_length:
+        raise ValueError(f"Invalid {key}")
+    return value
+
+
+def _safe_local_directory(message: dict[str, Any]) -> Path:
+    raw = str(message.get("jobId") or message.get("requestId") or "request")
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-")[:80] or "request"
+    return Path(f"/tmp/find-my-alexa-session-{slug}")
+
+
+def _post_runner_event(message: dict[str, Any], status: str, detail: str = "") -> None:
+    callback_url = message.get("callbackUrl")
+    token = os.environ.get("RUNNER_API_TOKEN", "").strip()
+    if not isinstance(callback_url, str) or not callback_url or not token:
+        return
+
+    payload = {
+        "jobId": message.get("jobId", ""),
+        "accountId": message.get("accountId", ""),
+        "deviceId": message.get("deviceId", ""),
+        "status": status,
+        "message": detail,
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        callback_url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Runner-Token": token,
+            "User-Agent": "DeviceFinderRunner/1.0",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3):
+            pass
+    except (OSError, urllib.error.URLError):
+        print("Find My worker warning: callback_failed")
 
 
 @contextlib.contextmanager
@@ -68,23 +131,39 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         raise ValueError("Expected exactly one SQS record")
 
     message = json.loads(records[0]["body"])
-    if message.get("action") != "ring":
+    action = message.get("action")
+    if action not in {"ring", "health_check"}:
         raise ValueError("Unsupported action")
 
     store = S3SessionStore(
-        bucket=os.environ["SESSION_BUCKET"],
-        prefix=os.environ.get("SESSION_PREFIX", "session/"),
+        bucket=_message_value(message, "sessionBucket", env_key="SESSION_BUCKET"),
+        prefix=_message_value(
+            message,
+            "sessionPrefix",
+            env_key="SESSION_PREFIX",
+            default="session/",
+        ),
+        local_directory=_safe_local_directory(message),
     )
     try:
         # Bound download and every Apple request before the external side
         # effect, while reserving seven seconds for persistence and cleanup.
         with _operation_deadline(context, max_seconds=35.0, reserve_ms=7_000):
             session_directory = store.download()
-            ring_device(
-                apple_id=os.environ["APPLE_ID"],
-                target_name=os.environ["DEVICE_NAME"],
-                session_directory=session_directory,
-            )
+            apple_id = _message_value(message, "appleId", env_key="APPLE_ID")
+            device_name = _message_value(message, "deviceName", env_key="DEVICE_NAME")
+            if action == "health_check":
+                check_device(
+                    apple_id=apple_id,
+                    target_name=device_name,
+                    session_directory=session_directory,
+                )
+            else:
+                ring_device(
+                    apple_id=apple_id,
+                    target_name=device_name,
+                    session_directory=session_directory,
+                )
 
         # Persist refreshed cookies after a successful operation. Failure here
         # is logged but must not cause SQS to retry and ring the phone twice.
@@ -96,9 +175,13 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         category = _failure_category(exc)
         print(f"Find My worker failed: {category}")
+        _post_runner_event(message, category, category)
+        if action == "health_check" and category == "reauthentication_required":
+            return {"processed": 1}
         raise WorkerOperationError(f"Find My worker failed: {category}") from None
     finally:
         store.cleanup()
 
     print("Find My sound request completed")
+    _post_runner_event(message, "healthy" if action == "health_check" else "succeeded")
     return {"processed": 1}
