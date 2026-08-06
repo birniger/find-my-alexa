@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Private Alexa skill that queues a Find My sound for one iPhone.
+Description: Private Alexa skill that queues a Find My sound for each linked user's iPhone.
 
 Parameters:
   AppleId:
@@ -16,8 +16,17 @@ Parameters:
     Description: Alexa skill ID. Leave empty for the first deploy, then redeploy after creating the skill.
   SpokenPhoneName:
     Type: String
-    Default: Basil's phone
+    Default: your iPhone
     Description: Name Alexa says after accepting the request.
+  FindMyApiBaseUrl:
+    Type: String
+    Default: ""
+    Description: Hosted Device Finder app URL. When set, account-linked Alexa users ring through Cloudflare.
+  RunnerApiToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Shared bearer token used by the runner to report job status back to Cloudflare.
 
 Conditions:
   HasSkillId: !Not [!Equals [!Ref SkillId, ""]]
@@ -69,6 +78,30 @@ Resources:
         deadLetterTargetArn: !GetAtt RingRequestsDeadLetterQueue.Arn
         maxReceiveCount: 2
 
+  SetupRequestsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: 3600
+      MessageRetentionPeriod: 900
+      SqsManagedSseEnabled: true
+
+  CloudflareDispatcherUser:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: SendFindMyJobs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SendFindMyJobs
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource:
+                  - !GetAtt RingRequestsQueue.Arn
+                  - !GetAtt SetupRequestsQueue.Arn
+
   RingRequestsDeadLetterAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -99,6 +132,7 @@ Resources:
       Environment:
         Variables:
           EXPECTED_SKILL_ID: !Ref SkillId
+          FIND_MY_API_BASE_URL: !Ref FindMyApiBaseUrl
           PHONE_SPOKEN_NAME: !Ref SpokenPhoneName
           RING_QUEUE_URL: !Ref RingRequestsQueue
       Policies:
@@ -130,6 +164,7 @@ Resources:
         Variables:
           APPLE_ID: !Ref AppleId
           DEVICE_NAME: !Ref DeviceName
+          RUNNER_API_TOKEN: !Ref RunnerApiToken
           SESSION_BUCKET: !Ref SessionBucket
           SESSION_PREFIX: session/
       Policies:
@@ -150,6 +185,33 @@ Resources:
             BatchSize: 1
             Enabled: true
 
+  SetupWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/setup/
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+        - arm64
+      MemorySize: 512
+      Timeout: 600
+      Environment:
+        Variables:
+          RUNNER_API_TOKEN: !Ref RunnerApiToken
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref SessionBucket
+        # Adding a device reuses the stored session bundle instead of a fresh Apple sign-in.
+        - S3ReadPolicy:
+            BucketName: !Ref SessionBucket
+      Events:
+        SetupRequest:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SetupRequestsQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
 Outputs:
   SkillFunctionArn:
     Description: Paste this ARN into the Alexa custom skill endpoint.
@@ -163,3 +225,12 @@ Outputs:
   DeadLetterAlarmName:
     Description: Alarm that changes state when a ring request reaches the dead-letter queue.
     Value: !Ref RingRequestsDeadLetterAlarm
+  SetupQueueUrl:
+    Description: Cloudflare SETUP_QUEUE_URL for phone-based Apple setup.
+    Value: !Ref SetupRequestsQueue
+  RingQueueUrl:
+    Description: Cloudflare RUNNER_QUEUE_URL for ring and health-check jobs.
+    Value: !Ref RingRequestsQueue
+  CloudflareDispatcherUserName:
+    Description: IAM user whose access key is stored only as a Cloudflare Worker secret.
+    Value: !Ref CloudflareDispatcherUser
