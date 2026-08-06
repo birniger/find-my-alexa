@@ -760,6 +760,18 @@ async function handleRingRequest(
   return json({ jobId, status: "queued", dispatched: Boolean(messageId), deviceId: device.id, deviceLabel: device.label }, 202);
 }
 
+async function handlePushUnsubscribe(request: Request, env: Env, account: Account): Promise<Response> {
+  const payload = await readJson(request);
+  const endpoint = stringField(payload, "endpoint", 1000);
+  if (!endpoint) throw new HttpError(400, "A push endpoint is required.");
+  const result = await env.DB.prepare(
+    "UPDATE push_subscriptions SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE account_id = ? AND endpoint = ?",
+  )
+    .bind(account.id, endpoint)
+    .run();
+  return json({ status: "revoked", removed: Boolean(result.meta.changes) });
+}
+
 async function handlePushSubscription(request: Request, env: Env, account: Account): Promise<Response> {
   const payload = await readJson(request);
   const subscription = payload.subscription;
@@ -1203,6 +1215,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     }
     if (request.method === "POST" && path === "/api/ring/request") return handleRingRequest(request, env, account, "web");
     if (request.method === "POST" && path === "/api/push-subscriptions") return handlePushSubscription(request, env, account);
+    if (request.method === "POST" && path === "/api/push-subscriptions/revoke") {
+      return handlePushUnsubscribe(request, env, account);
+    }
     if (path === "/api/admin/summary" && request.method === "GET") {
       await requireOwner(request, env);
       return handleAdminSummary(env);

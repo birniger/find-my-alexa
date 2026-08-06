@@ -146,7 +146,7 @@ function renderDashboard(status) {
       </div>
       <section class="notification-setup" aria-labelledby="notificationHeading">
         <div><p class="eyebrow">Renewal alerts</p><h2 id="notificationHeading">Keep Alexa connected.</h2><p>Enable notifications on this device so Device Finder can tell you when Apple asks for a fresh login.</p></div>
-        <div class="notification-action"><button id="enablePush" class="primary" type="button">Enable notifications</button><small id="pushStatus">On iPhone, open the saved Home Screen app first.</small></div>
+        <div class="notification-action"><button id="enablePush" class="primary" type="button">Enable notifications</button><button id="disablePush" class="secondary" type="button" hidden>Turn off</button><small id="pushStatus">On iPhone, open the saved Home Screen app first.</small></div>
       </section>
       <div class="status-grid compact">
         <article><span>Apple devices</span><strong>${escapeHtml(devices.length)}</strong><small>${escapeHtml(readyDevices.length)} ready</small></article>
@@ -219,6 +219,7 @@ function renderDashboard(status) {
     button.disabled = false;
   }));
   document.querySelector("#enablePush")?.addEventListener("click", (event) => void savePushSubscription(event.currentTarget));
+  document.querySelector("#disablePush")?.addEventListener("click", (event) => void removePushSubscription(event.currentTarget));
   bindRenameControls();
   void updatePushState();
   bindCopyButtons();
@@ -671,8 +672,8 @@ async function savePushSubscription(button) {
     });
     if (!subscription) throw new Error("Push could not be enabled.");
     await api("/api/push-subscriptions", { method: "POST", body: JSON.stringify({ subscription, userAgent: navigator.userAgent }) });
-    button.textContent = "Notifications enabled";
-    if (pushStatus) pushStatus.textContent = "This device will receive Device Finder renewal alerts.";
+    showPushEnabled(true);
+    if (pushStatus) pushStatus.textContent = "This device receives renewal alerts.";
   } catch (error) {
     button.disabled = false;
     button.textContent = "Enable notifications";
@@ -684,6 +685,40 @@ async function savePushSubscription(button) {
         ? "This device refused to register for push notifications. Open Device Finder from your Home Screen, then try again."
         : rawMessage;
     }
+  }
+}
+
+function showPushEnabled(enabled) {
+  const enableButton = document.querySelector("#enablePush");
+  const disableButton = document.querySelector("#disablePush");
+  if (enableButton) {
+    enableButton.hidden = enabled;
+    enableButton.disabled = false;
+    enableButton.textContent = "Enable notifications";
+  }
+  if (disableButton) {
+    disableButton.hidden = !enabled;
+    disableButton.disabled = false;
+    disableButton.textContent = "Turn off";
+  }
+}
+
+async function removePushSubscription(button) {
+  const pushStatus = document.querySelector("#pushStatus");
+  button.disabled = true;
+  button.textContent = "Turning off...";
+  try {
+    const registration = await navigator.serviceWorker.getRegistration("/");
+    const subscription = await registration?.pushManager.getSubscription();
+    if (subscription) {
+      await api("/api/push-subscriptions/revoke", { method: "POST", body: JSON.stringify({ endpoint: subscription.endpoint }) });
+      await subscription.unsubscribe();
+    }
+    showPushEnabled(false);
+    if (pushStatus) pushStatus.textContent = "This device no longer receives renewal alerts.";
+  } catch (error) {
+    showPushEnabled(true);
+    if (pushStatus) pushStatus.textContent = error?.message || "Notifications could not be turned off.";
   }
 }
 
@@ -700,9 +735,8 @@ async function updatePushState() {
     const registration = await navigator.serviceWorker.getRegistration("/");
     const subscription = await registration?.pushManager.getSubscription();
     if (subscription && Notification.permission === "granted") {
-      button.disabled = true;
-      button.textContent = "Notifications enabled";
-      if (pushStatus) pushStatus.textContent = "This device will receive Device Finder renewal alerts.";
+      showPushEnabled(true);
+      if (pushStatus) pushStatus.textContent = "This device receives renewal alerts.";
     }
   } catch {
     // The action button remains available for a user-initiated retry.
