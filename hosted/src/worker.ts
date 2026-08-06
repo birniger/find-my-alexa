@@ -912,8 +912,10 @@ async function handleAdminAccounts(env: Env): Promise<Response> {
       // Correlated subqueries keep this one row per account; joining devices
       // repeated an account once per device.
       "SELECT a.id, a.email, a.display_name, a.role, a.status, a.created_at,",
+      // Most urgent status first: an admin needs the device that needs help.
       "COALESCE((SELECT d.status FROM devices d WHERE d.account_id = a.id",
-      "  ORDER BY CASE d.status WHEN 'ready' THEN 0 WHEN 'needs_renewal' THEN 1 ELSE 2 END, d.created_at LIMIT 1), 'not_set_up') AS device_status,",
+      "  ORDER BY CASE d.status WHEN 'needs_renewal' THEN 0 WHEN 'unhealthy' THEN 1",
+      "    WHEN 'not_set_up' THEN 2 WHEN 'setup_pending' THEN 3 ELSE 4 END, d.created_at LIMIT 1), 'not_set_up') AS device_status,",
       "(SELECT COUNT(*) FROM devices d WHERE d.account_id = a.id) AS device_count,",
       "(SELECT COUNT(*) FROM devices d WHERE d.account_id = a.id AND d.status = 'ready') AS ready_device_count,",
       "COALESCE((SELECT l.status FROM alexa_links l WHERE l.account_id = a.id LIMIT 1), 'unlinked') AS alexa_status",

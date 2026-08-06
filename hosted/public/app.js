@@ -253,6 +253,16 @@ function bindRenameControls() {
   }));
 }
 
+function describeAccountDevices(account) {
+  const total = Number(account.device_count ?? 0);
+  const ready = Number(account.ready_device_count ?? 0);
+  if (!total) return "No Apple devices";
+  const noun = total === 1 ? "device" : "devices";
+  if (ready === total) return `${total} ${noun} ready`;
+  const state = String(account.device_status || "not_set_up").replaceAll("_", " ");
+  return ready ? `${ready} of ${total} ${noun} ready · ${state}` : `${total} ${noun} · ${state}`;
+}
+
 function renderAdmin(summary, accounts, invites) {
   app.innerHTML = `
     <header class="topbar">
@@ -283,7 +293,7 @@ function renderAdmin(summary, accounts, invites) {
         ${invites.length ? invites.map((invite) => `<article class="alert-row"><strong>${escapeHtml(invite.email)}</strong><span>Amazon: ${escapeHtml(invite.amazon_email || invite.email)} · ${escapeHtml(invite.status)}</span></article>`).join("") : `<p class="empty">No invites yet.</p>`}
       </div></section>
       <section class="panel"><header class="section-header"><h2>Accounts</h2></header><div class="alert-list">
-        ${accounts.length ? accounts.map((account) => `<article class="alert-row"><strong>${escapeHtml(account.display_name || account.email)}</strong><span>${escapeHtml(account.email)} · ${escapeHtml(account.ready_device_count ?? 0)}/${escapeHtml(account.device_count ?? 0)} devices ready · ${escapeHtml(String(account.device_status).replaceAll("_", " "))} · Alexa ${escapeHtml(account.alexa_status)}</span></article>`).join("") : `<p class="empty">No accounts yet.</p>`}
+        ${accounts.length ? accounts.map((account) => `<article class="alert-row"><strong>${escapeHtml(account.display_name || account.email)}</strong><span>${escapeHtml(account.email)} · ${escapeHtml(describeAccountDevices(account))} · Alexa ${escapeHtml(String(account.alexa_status).replaceAll("_", " "))}</span></article>`).join("") : `<p class="empty">No accounts yet.</p>`}
       </div></section>
     </section>
   `;
