@@ -1,0 +1,53 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "find-my-friends-app",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "find-my-friends-prod",
+      "database_id": "YOUR_D1_DATABASE_ID",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  "vars": {
+    "APP_NAME": "Device Finder",
+    "AUTH0_DOMAIN": "YOUR_TENANT.eu.auth0.com",
+    "AUTH0_CLIENT_ID": "YOUR_AUTH0_SPA_CLIENT_ID",
+    "AUTH0_AUDIENCE": "https://find-my-friends-api",
+    "AUTH0_CONNECTION": "Find-My-Users",
+    "OWNER_EMAIL": "YOUR_OWNER_EMAIL",
+    "REGISTRATION_MODE": "invite-only",
+    "RUNNER_API_AUDIENCE": "find-my-runner",
+    "RUNNER_AWS_REGION": "eu-west-1",
+    "RUNNER_QUEUE_URL": "https://sqs.YOUR_REGION.amazonaws.com/YOUR_AWS_ACCOUNT_ID/YOUR_RING_QUEUE.fifo",
+    "SETUP_QUEUE_URL": "https://sqs.YOUR_REGION.amazonaws.com/YOUR_AWS_ACCOUNT_ID/YOUR_SETUP_QUEUE.fifo",
+    "SESSION_BUCKET": "YOUR_SESSION_BUCKET_NAME",
+    "PUBLIC_BASE_URL": "https://YOUR_WORKER.workers.dev",
+    "VAPID_PUBLIC_KEY": "YOUR_VAPID_PUBLIC_KEY",
+    "VAPID_SUBJECT": "mailto:YOUR_OWNER_EMAIL",
+    "EMAIL_FROM": "",
+    "EMAIL_FROM_NAME": "Device Finder"
+  },
+  "triggers": {
+    "crons": ["17 3 * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  }
+}

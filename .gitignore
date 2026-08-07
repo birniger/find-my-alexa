@@ -1,4 +1,9 @@
 .aws-sam/
+.wrangler/
+hosted/.wrangler/
+hosted/wrangler.jsonc
+hosted/node_modules/
+hosted/worker-dist/
 .pytest_cache/
 __pycache__/
 *.py[cod]

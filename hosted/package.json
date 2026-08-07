@@ -1,0 +1,24 @@
+{
+  "name": "find-my-friends-hosted",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler deploy --dry-run --outdir worker-dist",
+    "deploy": "npm run build && WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler deploy",
+    "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler dev --local",
+    "migrate:local": "WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler d1 migrations apply find-my-friends-prod --local",
+    "migrate:remote": "WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler d1 migrations apply find-my-friends-prod --remote",
+    "types": "WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler types"
+  },
+  "dependencies": {
+    "@types/web-push": "^3.6.4",
+    "jose": "6.1.0",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260804.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.119.0"
+  }
+}

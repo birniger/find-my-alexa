@@ -69,6 +69,56 @@ def _configured_device_id(session_directory: Path) -> str | None:
     return device_id
 
 
+def _matching_devices(devices: list[Any], target_name: str, session_directory: Path) -> list[Any]:
+    target_id = _configured_device_id(session_directory)
+    if target_id:
+        return [
+            device
+            for device in devices
+            if str(device.data.get("id") or "") == target_id
+        ]
+
+    # Backward-compatible fallback for sessions created before target.json.
+    wanted = _normalise_name(target_name)
+    matches = []
+    for device in devices:
+        name = str(device.status().get("name") or "")
+        if _normalise_name(name) == wanted:
+            matches.append(device)
+    return matches
+
+
+def check_device(apple_id: str, target_name: str, session_directory: Path) -> None:
+    """Validate that the cached session can still see the configured device."""
+    logging.getLogger("pyicloud").setLevel(logging.CRITICAL)
+
+    from pyicloud import PyiCloudService
+
+    api = PyiCloudService(
+        apple_id,
+        password=None,
+        cookie_directory=str(session_directory),
+        with_family=False,
+        authenticate=False,
+    )
+    _install_http_timeout(api)
+    auth_status = api.get_auth_status()
+    if not auth_status.get("authenticated") or auth_status.get("requires_2fa"):
+        raise ReauthenticationRequired(
+            "The iCloud session expired; renew the Apple setup"
+        )
+
+    manager = api.devices
+    try:
+        devices = list(manager)
+        if len(_matching_devices(devices, target_name, session_directory)) != 1:
+            raise DeviceNotFound(
+                "The configured Find My device was not returned exactly once"
+            )
+    finally:
+        _stop_device_monitor(manager)
+
+
 def ring_device(apple_id: str, target_name: str, session_directory: Path) -> None:
     """Validate the cached session and ring the exact configured device.
 
@@ -97,21 +147,7 @@ def ring_device(apple_id: str, target_name: str, session_directory: Path) -> Non
     manager = api.devices
     try:
         devices = list(manager)
-        target_id = _configured_device_id(session_directory)
-        if target_id:
-            matches = [
-                device
-                for device in devices
-                if str(device.data.get("id") or "") == target_id
-            ]
-        else:
-            # Backward-compatible fallback for sessions created before target.json.
-            wanted = _normalise_name(target_name)
-            matches = []
-            for device in devices:
-                name = str(device.status().get("name") or "")
-                if _normalise_name(name) == wanted:
-                    matches.append(device)
+        matches = _matching_devices(devices, target_name, session_directory)
 
         if len(matches) != 1:
             raise DeviceNotFound(

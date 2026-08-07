@@ -1,12 +1,14 @@
-# Find My Alexa
+# Find My Alexa / Find My Friends
 
 A private Alexa developer skill that makes one configured iPhone play Apple's
-real Find My sound.
+real Find My sound. The next product shape is **Find My Friends**, a separate
+invite-only web app for friends to set up and renew their own iPhones without
+using Terminal.
 
 The source repository can be public, but the deployed Alexa skill and encrypted
 iCloud session must remain private.
 
-The intended experience is:
+The original personal experience is:
 
 > **You:** Alexa, where's Basil's phone?
 >
@@ -23,8 +25,8 @@ trusted iCloud session to call Find My.
 Apple does not publish a Find My owner API. This project uses the undocumented
 iCloud web endpoint implemented by `pyicloud`. It can stop working when Apple
 changes authentication or the service. Apple's iCloud terms also restrict
-automated access. Keep this as a personal, private experiment; do not publish it
-as a public Alexa skill.
+automated access. Keep this as a personal/private friends experiment; do not
+publish it as a public Alexa skill or public phone-finder product.
 
 See [RESEARCH.md](RESEARCH.md) for the source-backed feasibility review.
 
@@ -47,6 +49,90 @@ Alexa Routine: “where's Basil's phone?”
                               ▼
                    Apple Find My Play Sound
 ```
+
+## Friends beta web app
+
+`hosted/` contains the new Cloudflare control plane for the private friends
+beta:
+
+- installable PWA shell for testers;
+- Auth0 email/password sign-in;
+- invite-only account creation;
+- D1-backed accounts, invites, Alexa links, device state, setup sessions, ring
+  jobs, push subscriptions, and renewal alerts;
+- owner admin at `/admin`;
+- runner-facing APIs for queued ring jobs and Find My session-health events.
+- signed AWS SQS dispatch for ring and daily no-ring health-check jobs;
+- a separate AWS setup queue/worker for phone-first Apple login, 2FA, device
+  selection, one test ring, and encrypted session upload;
+- PWA push delivery for renewal alerts with Cloudflare Email fallback.
+
+The hosted app does not replace the Python Find My runner yet. The runner remains
+the safest v1 place for `pyicloud` because it already works with the encrypted
+session bundle format. Cloudflare owns the friendly setup, account, status, and
+notification surface; the Python runner owns the Apple side effect.
+
+### Hosted commands
+
+```sh
+cd hosted
+cp wrangler.example.jsonc wrangler.jsonc
+npm install
+npm run types
+npm run migrate:local
+npm run dev
+```
+
+`hosted/wrangler.jsonc` holds deployment-specific values (account IDs, queue
+URLs, bucket and database names), so it is gitignored like
+`skill-package/skill.json`. Copy the example and replace every `YOUR_` value.
+
+Before production deployment:
+
+1. Create separate Auth0 app/API clients and a dedicated database connection
+   for Find My Friends.
+2. Create a separate Cloudflare D1 database and replace the `database_id` in
+   `hosted/wrangler.jsonc`.
+3. Create Web Push VAPID keys and set `VAPID_PUBLIC_KEY` plus
+   `VAPID_PRIVATE_KEY`.
+4. Enable Cloudflare Email Sending for the sending domain, then set
+   `EMAIL_FROM`.
+5. Set these Cloudflare secrets: `RUNNER_API_TOKEN`,
+   `RUNNER_AWS_ACCESS_KEY_ID`, `RUNNER_AWS_SECRET_ACCESS_KEY`, and
+   `VAPID_PRIVATE_KEY`. Set `RUNNER_QUEUE_URL`, `SETUP_QUEUE_URL`, and
+   `SESSION_BUCKET` from the AWS stack outputs.
+6. Replace `PUBLIC_BASE_URL` with the deployed URL.
+7. Apply remote migrations with `npm run migrate:remote`.
+8. Deploy with `npm run deploy`.
+
+The AWS runner stack now also accepts:
+
+- `FindMyApiBaseUrl`: the deployed Cloudflare app URL. The Alexa skill uses this
+  for account-linked users.
+- `RunnerApiToken`: the same bearer secret as Cloudflare's `RUNNER_API_TOKEN`.
+  The Python runner uses it when reporting health or renewal-required events
+  back to Cloudflare.
+
+The Alexa skill should be configured with Auth0 account linking for the hosted
+Find My Friends app. Once linked, Alexa sends the user's Auth0 access token to
+the skill Lambda; the Lambda posts to the hosted app, which queues that friend's
+own iPhone job. Find My uses the dedicated `Find-My-Users` Auth0 database;
+Soundbox credentials and Google login are not enabled for either Find My client.
+Find My sign-up also requires a distinct username so password-manager entries
+remain recognizable even though Auth0 administration uses the same tenant.
+When hosted mode is configured, missing or expired account linking never falls
+back to the legacy single-user phone.
+
+The setup UI is intentionally phone-first. The Apple password passes through
+the Cloudflare Worker over TLS into an encrypted AWS setup queue for the live
+setup attempt. It is not stored in D1, written to logs, or retained after the
+queue message is processed. The setup worker waits for the
+verification code and device selection through Cloudflare, sends one test ring,
+then uploads only the encrypted session bundle and selected device ID.
+
+Daily health checks use the Python runner's no-ring validation path. They verify
+that the saved Find My session can still see the selected iPhone and report
+`reauthentication_required` without playing a sound.
 
 The skill does not store an Apple password. `scripts/authenticate.py` asks for
 it locally, completes Apple 2FA, and uploads one encrypted-at-rest ZIP containing
@@ -231,7 +317,9 @@ No AWS redeployment is needed for session renewal.
 
 ## Security properties
 
-- The Apple password and 2FA code never enter Alexa or AWS.
+- The Apple password and 2FA code never enter Alexa. During phone setup they
+  pass through the authenticated Cloudflare app to the encrypted AWS setup
+  relay, are excluded from logs, and are discarded after that attempt.
 - The session bucket blocks public access, uses server-side encryption and
   versioning, and is retained if the stack is deleted. Superseded session
   versions expire after one day.
