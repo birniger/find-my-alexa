@@ -979,7 +979,7 @@ async function handleOwnerStatus(request: Request, env: Env): Promise<Response> 
   return json({ ...summary, ownerReady: Boolean(owner) });
 }
 
-async function handleOwnerPushSubscription(request: Request, env: Env): Promise<Response> {
+async function ownerAccount(request: Request, env: Env): Promise<Account> {
   if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
   const owner = await env.DB.prepare(
     "SELECT id, auth_subject, email, display_name, role, status FROM accounts WHERE email_normalized = ? AND role = 'owner'",
@@ -987,7 +987,15 @@ async function handleOwnerPushSubscription(request: Request, env: Env): Promise<
     .bind(normalizeEmail(env.OWNER_EMAIL))
     .first<AccountRow>();
   if (!owner) throw new HttpError(409, "Open Device Finder and sign in once before enabling owner alerts.");
-  return handlePushSubscription(request, env, mapAccount(owner));
+  return mapAccount(owner);
+}
+
+async function handleOwnerPushSubscription(request: Request, env: Env): Promise<Response> {
+  return handlePushSubscription(request, env, await ownerAccount(request, env));
+}
+
+async function handleOwnerPushUnsubscribe(request: Request, env: Env): Promise<Response> {
+  return handlePushUnsubscribe(request, env, await ownerAccount(request, env));
 }
 
 function runnerAuthorized(request: Request, env: Env): boolean {
@@ -1180,6 +1188,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (request.method === "GET" && path === "/api/owner/status") return handleOwnerStatus(request, env);
   if (request.method === "POST" && path === "/api/owner/push-subscriptions") {
     return handleOwnerPushSubscription(request, env);
+  }
+  if (request.method === "POST" && path === "/api/owner/push-subscriptions/revoke") {
+    return handleOwnerPushUnsubscribe(request, env);
   }
   if (request.method === "GET" && path === "/api/runner/jobs") return handleRunnerJobs(request, env);
   if (request.method === "POST" && path === "/api/runner/events") return handleRunnerEvent(request, env, ctx);
