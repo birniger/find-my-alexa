@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import webpush from "web-push";
+import { WorkerMailer } from "worker-mailer";
 
 type Identity = { subject: string; accessToken: string; email?: string; displayName?: string };
 type Account = {
@@ -57,7 +58,7 @@ const json = (data: unknown, status = 200): Response =>
 const crossOriginPath = (path: string): boolean => path === "/api/config" || path.startsWith("/api/owner/");
 const corsHeaders = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
   "access-control-allow-headers": "authorization, content-type",
   "access-control-max-age": "86400",
 };
@@ -849,16 +850,79 @@ async function sendPushNotification(env: Env, accountId: string, title: string, 
   return delivered;
 }
 
-async function sendEmailNotification(env: Env, email: string, title: string, body: string): Promise<boolean> {
-  if (!env.EMAIL || !env.EMAIL_FROM) return false;
-  await env.EMAIL.send({
-    to: email,
-    from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME || "Device Finder" },
-    subject: title,
-    html: `<p>${body.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</p>`,
-    text: body,
+type SmtpSettings = {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  from: string;
+  fromName: string;
+  secure: boolean;
+};
+
+const SMTP_KEYS = ["smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_from", "smtp_from_name", "smtp_secure"] as const;
+
+async function readSettings(env: Env, keys: readonly string[]): Promise<Record<string, string>> {
+  const placeholders = keys.map(() => "?").join(", ");
+  const result = await env.DB.prepare(`SELECT key, value FROM app_settings WHERE key IN (${placeholders})`)
+    .bind(...keys)
+    .all<{ key: string; value: string }>();
+  return Object.fromEntries(result.results.map((row) => [row.key, row.value]));
+}
+
+async function smtpSettings(env: Env): Promise<SmtpSettings | null> {
+  const stored = await readSettings(env, SMTP_KEYS);
+  const host = stored.smtp_host ?? "";
+  const from = stored.smtp_from ?? "";
+  const port = Number(stored.smtp_port ?? "");
+  // Without a host, a sender and a usable port there is nothing to try, and a
+  // half-configured server would fail once per queued alert.
+  if (!host || !from || !Number.isInteger(port) || port <= 0) return null;
+  return {
+    host,
+    port,
+    username: stored.smtp_username ?? "",
+    password: stored.smtp_password ?? "",
+    from,
+    fromName: stored.smtp_from_name || "Device Finder",
+    secure: stored.smtp_secure !== "0",
+  };
+}
+
+const escapeHtml = (value: string): string =>
+  value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+async function sendEmailViaSmtp(smtp: SmtpSettings, to: string, title: string, body: string): Promise<void> {
+  // Port 25 is blocked outbound from Workers; 587 and 465 are the usable ones.
+  const mailer = await WorkerMailer.connect({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    ...(smtp.username ? { credentials: { username: smtp.username, password: smtp.password }, authType: "plain" as const } : {}),
   });
-  return true;
+  try {
+    await mailer.send({
+      from: { name: smtp.fromName, email: smtp.from },
+      to: { email: to },
+      subject: title,
+      text: body,
+      html: `<p>${escapeHtml(body)}</p>`,
+    });
+  } finally {
+    await mailer.close().catch(() => undefined);
+  }
+}
+
+async function sendEmailNotification(env: Env, email: string, title: string, body: string): Promise<boolean> {
+  const smtp = await smtpSettings(env);
+  if (!smtp) return false;
+  try {
+    await sendEmailViaSmtp(smtp, email, title, body);
+    return true;
+  } catch (error) {
+    console.error("SMTP delivery failed", error instanceof Error ? error.message : error);
+    return false;
+  }
 }
 
 async function deliverQueuedNotifications(env: Env, accountId?: string): Promise<void> {
@@ -1022,6 +1086,88 @@ async function handleOwnerPushSubscription(request: Request, env: Env): Promise<
 
 async function handleOwnerPushUnsubscribe(request: Request, env: Env): Promise<Response> {
   return handlePushUnsubscribe(request, env, await ownerAccount(request, env));
+}
+
+async function writeSettings(env: Env, entries: Record<string, string>): Promise<void> {
+  const statements = Object.entries(entries).map(([key, value]) =>
+    env.DB.prepare(
+      [
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)",
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+      ].join(" "),
+    ).bind(key, value),
+  );
+  if (statements.length) await env.DB.batch(statements);
+}
+
+async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Response> {
+  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+
+  if (request.method === "GET") {
+    const stored = await readSettings(env, SMTP_KEYS);
+    return json({
+      host: stored.smtp_host ?? "",
+      port: stored.smtp_port ?? "",
+      username: stored.smtp_username ?? "",
+      from: stored.smtp_from ?? "",
+      fromName: stored.smtp_from_name ?? "",
+      secure: stored.smtp_secure !== "0",
+      // Reports only that a password is on file. The value is never returned.
+      passwordSet: Boolean(stored.smtp_password),
+    });
+  }
+
+  const payload = await readJson(request);
+  const host = stringField(payload, "host", 255);
+  const from = stringField(payload, "from", 320);
+  const port = Number(stringField(payload, "port", 6));
+  if (!host) throw new HttpError(400, "A mail server host is required.");
+  if (!from.includes("@")) throw new HttpError(400, "A valid sender address is required.");
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new HttpError(400, "A valid port is required. Use 587 or 465.");
+  }
+  if (port === 25) {
+    throw new HttpError(400, "Cloudflare blocks outbound port 25. Use 587 or 465 instead.");
+  }
+
+  const entries: Record<string, string> = {
+    smtp_host: host,
+    smtp_port: String(port),
+    smtp_username: stringField(payload, "username", 320),
+    smtp_from: from,
+    smtp_from_name: stringField(payload, "fromName", 80),
+    smtp_secure: payload.secure === false ? "0" : "1",
+  };
+  // An empty password means "leave the stored one alone", so re-saving the
+  // form without retyping it does not wipe a working configuration.
+  const password = stringField(payload, "password", 500);
+  if (password) entries.smtp_password = password;
+
+  await writeSettings(env, entries);
+  return json({ status: "saved", passwordSet: Boolean(password) || Boolean((await readSettings(env, ["smtp_password"])).smtp_password) });
+}
+
+async function handleOwnerEmailTest(request: Request, env: Env): Promise<Response> {
+  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  const smtp = await smtpSettings(env);
+  if (!smtp) throw new HttpError(409, "Save a host, port and sender address before sending a test.");
+
+  const payload = await readJson(request).catch(() => ({}) as Record<string, unknown>);
+  const to = stringField(payload, "to", 320) || env.OWNER_EMAIL;
+  if (!to.includes("@")) throw new HttpError(400, "A valid recipient address is required.");
+
+  try {
+    await sendEmailViaSmtp(
+      smtp,
+      to,
+      "Device Finder test email",
+      "SMTP is set up correctly. Renewal alerts will reach you here when push cannot.",
+    );
+  } catch (error) {
+    // The mail server's own words are the whole point of a test button.
+    throw new HttpError(502, `The mail server rejected it: ${error instanceof Error ? error.message : "unknown error"}`);
+  }
+  return json({ status: "sent", to });
 }
 
 function runnerAuthorized(request: Request, env: Env): boolean {
@@ -1253,7 +1399,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       auth0Connection: authConfigured(env) ? env.AUTH0_CONNECTION : "",
       publicBaseUrl: env.PUBLIC_BASE_URL,
       vapidPublicKey: env.VAPID_PUBLIC_KEY || "",
-      emailFallbackAvailable: Boolean(env.EMAIL && env.EMAIL_FROM),
+      emailFallbackAvailable: Boolean(await smtpSettings(env)),
     });
   }
   if (request.method === "GET" && path === "/api/owner/status") return handleOwnerStatus(request, env);
@@ -1262,6 +1408,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   if (request.method === "POST" && path === "/api/owner/push-subscriptions/revoke") {
     return handleOwnerPushUnsubscribe(request, env);
+  }
+  if ((request.method === "GET" || request.method === "PUT") && path === "/api/owner/email") {
+    return handleOwnerEmailSettings(request, env);
+  }
+  if (request.method === "POST" && path === "/api/owner/email/test") {
+    return handleOwnerEmailTest(request, env);
   }
   if (request.method === "GET" && path === "/api/runner/jobs") return handleRunnerJobs(request, env);
   if (request.method === "POST" && path === "/api/runner/events") return handleRunnerEvent(request, env, ctx);

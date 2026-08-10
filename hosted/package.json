@@ -14,7 +14,8 @@
   "dependencies": {
     "@types/web-push": "^3.6.4",
     "jose": "6.1.0",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "worker-mailer": "^1.2.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260804.1",
