@@ -54,6 +54,20 @@ def _linked_access_token(event: dict[str, Any]) -> str:
     )
 
 
+def _alexa_user_id(event: dict[str, Any]) -> str:
+    """The household identifier Alexa sends on every request, linked or not.
+
+    Recording it while account linking still works is what will let the skill
+    stop needing an access token without anyone re-pairing their Echo.
+    """
+    return str(
+        event.get("context", {})
+        .get("System", {})
+        .get("user", {})
+        .get("userId", "")
+    ) or str(event.get("session", {}).get("user", {}).get("userId", ""))
+
+
 def _requested_device_name(event: dict[str, Any]) -> str:
     slot = (
         event.get("request", {})
@@ -89,8 +103,13 @@ def _queue_cloudflare_ring_request(event: dict[str, Any]) -> str | None:
         )
 
     device_name = _requested_device_name(event)
+    alexa_user_id = _alexa_user_id(event)
     body = json.dumps(
-        {"source": "alexa", **({"deviceName": device_name} if device_name else {})},
+        {
+            "source": "alexa",
+            **({"deviceName": device_name} if device_name else {}),
+            **({"alexaUserId": alexa_user_id} if alexa_user_id else {}),
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     request = urllib.request.Request(

@@ -80,7 +80,7 @@ class SkillTests(unittest.TestCase):
     def test_account_linked_user_posts_to_cloudflare(self):
         event = self.event({"type": "LaunchRequest"})
         event["context"] = {
-            "System": {"user": {"accessToken": "auth0-token"}}
+            "System": {"user": {"accessToken": "auth0-token", "userId": "amzn1.ask.account.HOUSEHOLD"}}
         }
         opened = Mock()
         opened.__enter__ = Mock(return_value=types.SimpleNamespace(status=202))
@@ -103,6 +103,12 @@ class SkillTests(unittest.TestCase):
         # check with 403 error 1010 before the Worker sees the request, which
         # the user hears as "link your account again".
         self.assertEqual(request.headers["User-agent"], "DeviceFinderSkill/1.0")
+        # Sent while account linking still proves who the caller is, so the
+        # skill can stop needing a token later without anyone re-pairing.
+        self.assertEqual(
+            json.loads(request.data.decode("utf-8"))["alexaUserId"],
+            "amzn1.ask.account.HOUSEHOLD",
+        )
 
     def test_cloudflare_failure_does_not_fall_back_to_legacy_queue(self):
         event = self.event({"type": "LaunchRequest"})

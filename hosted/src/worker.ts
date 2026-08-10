@@ -786,6 +786,29 @@ async function handleRingRequest(
     )
       .bind(account.id)
       .run();
+
+    // Alexa sends this identifier on every request, linked or not, so recording
+    // it now — while account linking still proves who the caller is — is what
+    // lets the skill stop needing a token later without anyone re-pairing.
+    const alexaUserId = stringField(payload, "alexaUserId", 500);
+    if (alexaUserId) {
+      const claimed = await env.DB.prepare(
+        "SELECT account_id FROM alexa_links WHERE amazon_user_id = ?",
+      )
+        .bind(alexaUserId)
+        .first<{ account_id: string }>();
+      if (claimed && claimed.account_id !== account.id) {
+        // The column is UNIQUE, so writing it anyway would fail the request and
+        // lose the ring. Say what happened instead and carry on.
+        console.error("Alexa household already bound to another Device Finder account");
+      } else if (!claimed) {
+        await env.DB.prepare(
+          "UPDATE alexa_links SET amazon_user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE account_id = ?",
+        )
+          .bind(alexaUserId, account.id)
+          .run();
+      }
+    }
   }
   const devices = await env.DB.prepare(
     [
