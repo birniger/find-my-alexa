@@ -61,6 +61,95 @@ function base64UrlToBytes(value) {
   return bytes;
 }
 
+// Ends both routes: the session this app issued, and the Auth0 one if it was
+// used. Clearing only one would leave the other quietly signing you back in.
+async function signOut() {
+  await fetch("/api/auth/sign-out", { method: "POST" }).catch(() => undefined);
+  if (authClient && (await authClient.isAuthenticated().catch(() => false))) {
+    authClient.logout({ logoutParams: { returnTo: window.location.origin } });
+    return;
+  }
+  window.location.replace("/");
+}
+
+function renderSetPassword(token) {
+  app.innerHTML = `
+    <header class="topbar">
+      <a class="brand" href="/"><span class="mark"></span><span>Device Finder</span></a>
+    </header>
+    <section class="workspace">
+      <div class="panel main-panel">
+        <p class="eyebrow">Your account</p>
+        <h1>Choose a password.</h1>
+        <p class="lede">Device Finder has its own sign-in now. This password is the one you will use from here on.</p>
+        <form id="setPasswordForm" class="setup-form" autocomplete="off">
+          <label>New password<input name="password" type="password" autocomplete="new-password" minlength="10" required></label>
+          <button class="primary" type="submit">Save and sign in</button>
+        </form>
+        <p id="setPasswordStatus" class="form-status">At least 10 characters.</p>
+      </div>
+    </section>
+  `;
+  document.querySelector("#setPasswordForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector("button");
+    const status = document.querySelector("#setPasswordStatus");
+    button.disabled = true;
+    status.textContent = "Saving...";
+    try {
+      await api("/api/auth/password/set", {
+        method: "POST",
+        body: JSON.stringify({ token, password: new FormData(event.currentTarget).get("password") }),
+      });
+      // Drop the token from the address bar before anything else loads.
+      window.history.replaceState({}, document.title, window.location.pathname);
+      await refresh();
+    } catch (error) {
+      status.textContent = error.message;
+      button.disabled = false;
+    }
+  });
+}
+
+function bindPasswordSignIn() {
+  document.querySelector("#passwordSignInForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    const status = document.querySelector("#passwordSignInStatus");
+    const values = new FormData(form);
+    button.disabled = true;
+    status.textContent = "Signing in...";
+    try {
+      await api("/api/auth/sign-in", {
+        method: "POST",
+        body: JSON.stringify({ email: values.get("email"), password: values.get("password") }),
+      });
+      await refresh();
+    } catch (error) {
+      status.textContent = error.message;
+      button.disabled = false;
+    }
+  });
+
+  document.querySelector("#forgotPassword")?.addEventListener("click", async () => {
+    const status = document.querySelector("#passwordSignInStatus");
+    const email = new FormData(document.querySelector("#passwordSignInForm")).get("email");
+    if (!email) {
+      status.textContent = "Enter your email address first, then ask for a link.";
+      return;
+    }
+    status.textContent = "Sending...";
+    try {
+      await api("/api/auth/password/request", { method: "POST", body: JSON.stringify({ email }) });
+      // Deliberately the same words whether or not that address has an account.
+      status.textContent = "If that address has an account, a link is on its way.";
+    } catch (error) {
+      status.textContent = error.message;
+    }
+  });
+}
+
 function renderSignedOut() {
   app.innerHTML = `
     <header class="topbar">
@@ -75,6 +164,18 @@ function renderSignedOut() {
       </div>
       <button id="signIn" class="primary" type="button">Sign in</button>
     </section>
+    <section class="panel main-panel">
+      <p class="eyebrow">Sign in with your password</p>
+      <form id="passwordSignInForm" class="setup-form" autocomplete="on">
+        <label>Email<input name="email" type="email" autocomplete="username" required></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+        <div class="actions">
+          <button class="primary" type="submit">Sign in</button>
+          <button id="forgotPassword" class="secondary" type="button">Email me a link</button>
+        </div>
+      </form>
+      <p id="passwordSignInStatus" class="form-status"></p>
+    </section>
     <section class="status-grid">
       <article><span>Account</span><strong>Separate login</strong><small>Create a Device Finder username and password; Soundbox credentials stay separate.</small></article>
       <article><span>Alerts</span><strong>Push first</strong><small>${config.emailFallbackAvailable ? "Email follows only when push cannot reach you." : "Email fallback can be added after a sending domain is connected."}</small></article>
@@ -87,6 +188,7 @@ function renderSignedOut() {
       prompt: "login",
     },
   }));
+  bindPasswordSignIn();
 }
 
 function renderAuthNotConfigured() {
@@ -199,7 +301,7 @@ function renderDashboard(status) {
       </section>
     </section>
   `;
-  document.querySelector("#signOut")?.addEventListener("click", () => void authClient.logout({ logoutParams: { returnTo: window.location.origin } }));
+  document.querySelector("#signOut")?.addEventListener("click", () => void signOut());
   document.querySelector("#startSetup")?.addEventListener("click", () => void startSetupFlow());
   document.querySelector("#addSavedDevice")?.addEventListener("click", () => void startSetupFlow({ reuse: true }));
   document.querySelectorAll("[data-ring-device]").forEach((button) => button.addEventListener("click", async () => {
@@ -298,7 +400,7 @@ function renderAdmin(summary, accounts, invites) {
       </div></section>
     </section>
   `;
-  document.querySelector("#signOut")?.addEventListener("click", () => void authClient.logout({ logoutParams: { returnTo: window.location.origin } }));
+  document.querySelector("#signOut")?.addEventListener("click", () => void signOut());
   document.querySelector("#inviteForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -785,6 +887,22 @@ async function refresh() {
 
 async function main() {
   await loadConfig();
+
+  // A set-password link is the one screen that must win over everything else:
+  // whoever follows it is proving they hold the address, signed in or not.
+  const linkToken = new URLSearchParams(window.location.search).get("set-password");
+  if (linkToken) {
+    renderSetPassword(linkToken);
+    return;
+  }
+
+  // A session this app issued is tried first. Auth0 stays accepted for the
+  // whole migration window, so either route gets you in.
+  if (await hasOwnSession()) {
+    await refresh();
+    return;
+  }
+
   if (!config.auth0Domain) {
     renderAuthNotConfigured();
     return;
@@ -795,6 +913,15 @@ async function main() {
     return;
   }
   await refresh();
+}
+
+async function hasOwnSession() {
+  try {
+    const response = await fetch("/api/me", { cache: "no-store" });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 main().catch((error) => {

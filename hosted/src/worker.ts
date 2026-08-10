@@ -1,6 +1,18 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import webpush from "web-push";
 import { WorkerMailer } from "worker-mailer";
+import {
+  SESSION_MAX_AGE,
+  TOKEN_VALID_HOURS,
+  accountIdFromSession,
+  createPasswordToken,
+  createSession,
+  destroySession,
+  hashPassword,
+  redeemPasswordToken,
+  sessionCookie,
+  verifyPassword,
+} from "./sign-in";
 
 type Identity = { subject: string; accessToken: string; email?: string; displayName?: string };
 type Account = {
@@ -177,7 +189,25 @@ async function ensureAccount(identity: Identity, env: Env): Promise<Account> {
   };
 }
 
+async function accountById(env: Env, accountId: string): Promise<Account | null> {
+  const row = await env.DB.prepare(`SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = ?`)
+    .bind(accountId)
+    .first<AccountRow>();
+  return row ? mapAccount(row) : null;
+}
+
 async function requireAccount(request: Request, env: Env): Promise<Account> {
+  // A session issued by this app is tried first because it is the route being
+  // migrated to. Auth0 stays accepted for the whole migration window, so an
+  // account can arrive by either and no one is ever locked out mid-change.
+  const sessionAccountId = await accountIdFromSession(request, env);
+  if (sessionAccountId) {
+    const account = await accountById(env, sessionAccountId);
+    if (account) {
+      if (account.status !== "active") throw new HttpError(403, "This account is suspended.");
+      return account;
+    }
+  }
   return ensureAccount(await verifyIdentity(request, env), env);
 }
 
@@ -1138,6 +1168,132 @@ async function handleOwnerPushUnsubscribe(request: Request, env: Env): Promise<R
   return handlePushUnsubscribe(request, env, await ownerAccount(request, env));
 }
 
+// A hash of a throwaway password, used to spend the same work on an unknown
+// address as on a real one. Without it, a fast rejection says "no account here".
+const ABSENT_ACCOUNT_HASH =
+  "pbkdf2p$sha256$100000$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000";
+
+function signedInResponse(value: string, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { ...jsonHeaders, "set-cookie": sessionCookie(value, SESSION_MAX_AGE) },
+  });
+}
+
+async function handleSignIn(request: Request, env: Env): Promise<Response> {
+  const payload = await readJson(request);
+  const email = normalizeEmail(stringField(payload, "email", 320));
+  const password = stringField(payload, "password", 500);
+  if (!email || !password) throw new HttpError(400, "Email and password are required.");
+
+  const row = await env.DB.prepare(
+    [
+      "SELECT a.id, c.password_hash FROM accounts a",
+      "JOIN account_credentials c ON c.account_id = a.id",
+      "WHERE a.email_normalized = ? AND a.status = 'active'",
+    ].join(" "),
+  )
+    .bind(email)
+    .first<{ id: string; password_hash: string }>();
+
+  const matched = await verifyPassword(env, password, row?.password_hash ?? ABSENT_ACCOUNT_HASH);
+  // One answer for both failures: whether an address has an account is not
+  // something an unauthenticated caller gets to learn.
+  if (!row || !matched) throw new HttpError(401, "That email and password do not match.");
+
+  const value = await createSession(env, row.id, request.headers.get("user-agent") ?? "");
+  return signedInResponse(value, { status: "signed_in" });
+}
+
+async function handleSignOut(request: Request, env: Env): Promise<Response> {
+  await destroySession(request, env);
+  return new Response(JSON.stringify({ status: "signed_out" }), {
+    status: 200,
+    headers: { ...jsonHeaders, "set-cookie": sessionCookie("", 0) },
+  });
+}
+
+async function sendPasswordLink(
+  env: Env,
+  account: { id: string; email: string; display_name: string },
+  purpose: "set" | "reset",
+): Promise<void> {
+  const smtp = await smtpSettings(env);
+  if (!smtp) {
+    console.error("Password link not sent: no mail server is configured");
+    return;
+  }
+  const token = await createPasswordToken(env, account.id, purpose);
+  const link = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/?set-password=${encodeURIComponent(token)}`;
+  const greeting = account.display_name ? `Hi ${account.display_name},` : "Hi,";
+  const opening = purpose === "set"
+    ? "Device Finder has its own sign-in now, so it needs a password of its own."
+    : "You asked to reset your Device Finder password.";
+  try {
+    await sendEmailViaSmtp(
+      smtp,
+      account.email,
+      purpose === "set" ? "Set your Device Finder password" : "Reset your Device Finder password",
+      [
+        greeting,
+        "",
+        opening,
+        "",
+        `Choose one here: ${link}`,
+        "",
+        `The link works once and expires in ${TOKEN_VALID_HOURS} hours.`,
+        "If you did not expect this, you can ignore it — nothing changes until the link is used.",
+      ].join("\n"),
+    );
+  } catch (error) {
+    console.error("Password link delivery failed", error instanceof Error ? error.message : error);
+  }
+}
+
+async function handlePasswordRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const payload = await readJson(request);
+  const email = normalizeEmail(stringField(payload, "email", 320));
+  if (email) {
+    const account = await env.DB.prepare(
+      "SELECT id, email, display_name FROM accounts WHERE email_normalized = ? AND status = 'active'",
+    )
+      .bind(email)
+      .first<{ id: string; email: string; display_name: string }>();
+    if (account) ctx.waitUntil(sendPasswordLink(env, account, "reset"));
+  }
+  // Same answer either way, for the same reason as sign-in.
+  return json({ status: "sent" });
+}
+
+async function handlePasswordSet(request: Request, env: Env): Promise<Response> {
+  const payload = await readJson(request);
+  const token = stringField(payload, "token", 200);
+  const password = stringField(payload, "password", 500);
+  if (password.length < 10) throw new HttpError(400, "Use a password of at least 10 characters.");
+
+  const accountId = await redeemPasswordToken(env, token);
+  if (!accountId) {
+    throw new HttpError(400, "That link has expired or was already used. Ask for a new one.");
+  }
+
+  const hash = await hashPassword(env, password);
+  await env.DB.batch([
+    env.DB.prepare(
+      [
+        "INSERT INTO account_credentials (account_id, password_hash) VALUES (?, ?)",
+        "ON CONFLICT(account_id) DO UPDATE SET password_hash = excluded.password_hash,",
+        "updated_at = CURRENT_TIMESTAMP",
+      ].join(" "),
+    ).bind(accountId, hash),
+    // Anyone signed in elsewhere is signed out: a password change is how
+    // someone takes their account back.
+    env.DB.prepare("DELETE FROM account_sessions WHERE account_id = ?").bind(accountId),
+  ]);
+
+  const value = await createSession(env, accountId, request.headers.get("user-agent") ?? "");
+  return signedInResponse(value, { status: "password_set" });
+}
+
 async function writeSettings(env: Env, entries: Record<string, string>): Promise<void> {
   const statements = Object.entries(entries).map(([key, value]) =>
     env.DB.prepare(
@@ -1469,6 +1625,17 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (request.method === "POST" && path === "/api/owner/email/test") {
     return handleOwnerEmailTest(request, env);
   }
+  // Sign-in owned by this app. Unauthenticated by nature, so these sit above
+  // the block below that requires an account.
+  if (request.method === "POST" && path === "/api/auth/sign-in") return handleSignIn(request, env);
+  if (request.method === "POST" && path === "/api/auth/sign-out") return handleSignOut(request, env);
+  if (request.method === "POST" && path === "/api/auth/password/request") {
+    return handlePasswordRequest(request, env, ctx);
+  }
+  if (request.method === "POST" && path === "/api/auth/password/set") {
+    return handlePasswordSet(request, env);
+  }
+
   if (request.method === "GET" && path === "/api/runner/jobs") return handleRunnerJobs(request, env);
   if (request.method === "POST" && path === "/api/runner/events") return handleRunnerEvent(request, env, ctx);
   if (request.method === "GET" && path.startsWith("/api/runner/setup/")) {
