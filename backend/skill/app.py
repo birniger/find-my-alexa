@@ -80,6 +80,10 @@ def _queue_cloudflare_ring_request(event: dict[str, Any]) -> str | None:
         return None
     access_token = _linked_access_token(event)
     if not access_token:
+        # Alexa sends no token when the account is not linked. Distinguishing
+        # that from a rejected token is otherwise impossible: both reach the
+        # user as a "link your account" prompt.
+        print("Device Finder skill: request carried no linked access token")
         raise RingRequestNotQueued(
             "Please link your Alexa account to Device Finder before ringing your Apple device."
         )
@@ -107,6 +111,9 @@ def _queue_cloudflare_ring_request(event: dict[str, Any]) -> str | None:
                     payload = {}
                 return str(payload.get("deviceLabel") or device_name or "your Apple device")
     except urllib.error.HTTPError as exc:
+        # The status separates a rejected token (401/403) from an incomplete
+        # Apple setup (409) or an unknown device (404), which all sound alike.
+        print(f"Device Finder skill: hosted app returned {exc.code}")
         if exc.code in {401, 403}:
             raise RingRequestNotQueued(
                 "Please link your Alexa account to Device Finder again."
