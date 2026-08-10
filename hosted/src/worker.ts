@@ -1107,10 +1107,16 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
     await env.DB.batch(statements);
     return json({ ok: true });
   }
-  if (jobId && ["running", "succeeded", "failed", "reauthentication_required", "healthy"].includes(status)) {
-    const jobStatus = status === "healthy" ? "succeeded" : status === "reauthentication_required" ? "failed" : status;
+  // The runner reports several sanitized failure categories and can gain more.
+  // Anything that is not a known success or progress report counts as a
+  // failure, so an unrecognised category can never leave a job queued forever
+  // while the dashboard keeps showing the device as healthy.
+  const runnerSucceeded = ["succeeded", "healthy"].includes(status);
+  const runnerFailed = Boolean(status) && !runnerSucceeded && status !== "running";
+  if (jobId && status) {
+    const jobStatus = runnerSucceeded ? "succeeded" : runnerFailed ? "failed" : "running";
     await env.DB.prepare("UPDATE ring_jobs SET status = ?, message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-      .bind(jobStatus, message, jobId)
+      .bind(jobStatus, message || status, jobId)
       .run();
   }
   if (accountId && deviceId && status === "healthy") {
@@ -1137,6 +1143,15 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
           "WHERE id = ? AND account_id = ?",
         ].join(" "),
       ).bind(deviceId, accountId),
+      // Close any open alert for this device. Without this the dedupe guard
+      // below would suppress the next genuine alert forever.
+      env.DB.prepare(
+        [
+          "UPDATE notification_events SET delivery_status = 'dismissed'",
+          "WHERE account_id = ? AND device_id = ? AND kind IN ('renewal_required', 'ring_failed')",
+          "AND delivery_status IN ('queued', 'push_sent', 'email_sent')",
+        ].join(" "),
+      ).bind(accountId, deviceId),
     ]);
   }
   if (accountId && deviceId && status === "reauthentication_required") {
@@ -1161,6 +1176,36 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
         deviceId,
         "Renew Apple login",
         "Apple Find My needs a fresh login before Alexa can ring this device.",
+        accountId,
+        deviceId,
+      ),
+    ]);
+    ctx.waitUntil(deliverQueuedNotifications(env, accountId));
+  }
+  // Every other failure category, including ones this Worker does not know
+  // about yet. Renewal is handled above because it has its own remedy.
+  if (accountId && deviceId && runnerFailed && status !== "reauthentication_required") {
+    await env.DB.batch([
+      env.DB.prepare(
+        [
+          "UPDATE devices SET status = 'unhealthy', last_health_status = 'failed',",
+          "last_health_message = ?, last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP",
+          "WHERE id = ? AND account_id = ?",
+        ].join(" "),
+      ).bind(message || status, deviceId, accountId),
+      env.DB.prepare(
+        [
+          "INSERT INTO notification_events (id, account_id, device_id, kind, title, body)",
+          "SELECT ?, ?, ?, 'ring_failed', ?, ?",
+          "WHERE NOT EXISTS (SELECT 1 FROM notification_events WHERE account_id = ? AND device_id = ?",
+          "AND kind = 'ring_failed' AND delivery_status IN ('queued', 'push_sent', 'email_sent'))",
+        ].join(" "),
+      ).bind(
+        crypto.randomUUID(),
+        accountId,
+        deviceId,
+        "Device Finder needs attention",
+        "Find My could not reach this Apple device. Open Device Finder to check its setup.",
         accountId,
         deviceId,
       ),

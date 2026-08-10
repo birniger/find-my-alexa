@@ -77,7 +77,7 @@ def _requested_device_name(event: dict[str, Any]) -> str:
 def _queue_cloudflare_ring_request(event: dict[str, Any]) -> str | None:
     api_base_url = os.environ.get("FIND_MY_API_BASE_URL", "").rstrip("/")
     if not api_base_url:
-        return False
+        return None
     access_token = _linked_access_token(event)
     if not access_token:
         raise RingRequestNotQueued(

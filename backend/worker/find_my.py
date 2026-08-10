@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -48,6 +49,38 @@ def _stop_device_monitor(manager: Any) -> None:
         monitor.join(timeout=1.0)
         if monitor.is_alive():
             raise MonitorShutdownError("The Find My background monitor did not stop")
+
+
+@contextlib.contextmanager
+def _apple_failures():
+    """Map pyicloud's own exceptions onto this module's categories.
+
+    Everything below happens inside pyicloud, before this module can compare a
+    name or an ID, so without translation these arrive at the worker as the
+    uninformative catch-all category. Classes are matched by name so this
+    module still never imports pyicloud at module scope.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001
+        name = type(exc).__name__
+        if name == "PyiCloudFailedLoginException":
+            # Find My rejected the restored session, so pyicloud tried to log in
+            # again and found no password. The worker deliberately stores none,
+            # so this always means the saved session is no longer trusted for
+            # Find My even though the general iCloud token still validates.
+            raise ReauthenticationRequired(
+                "The saved iCloud session is no longer trusted for Find My"
+            ) from exc
+        if name == "PyiCloudNoDevicesException":
+            raise DeviceNotFound("Find My returned no devices for this session") from exc
+        raise
+
+
+def _open_device_manager(api: Any) -> Any:
+    """Open Find My with pyicloud's failures translated."""
+    with _apple_failures():
+        return api.devices
 
 
 def _normalise_name(value: str) -> str:
@@ -108,9 +141,10 @@ def check_device(apple_id: str, target_name: str, session_directory: Path) -> No
             "The iCloud session expired; renew the Apple setup"
         )
 
-    manager = api.devices
+    manager = _open_device_manager(api)
     try:
-        devices = list(manager)
+        with _apple_failures():
+            devices = list(manager)
         if len(_matching_devices(devices, target_name, session_directory)) != 1:
             raise DeviceNotFound(
                 "The configured Find My device was not returned exactly once"
@@ -144,9 +178,10 @@ def ring_device(apple_id: str, target_name: str, session_directory: Path) -> Non
             "The iCloud session expired; rerun scripts/authenticate.py"
         )
 
-    manager = api.devices
+    manager = _open_device_manager(api)
     try:
-        devices = list(manager)
+        with _apple_failures():
+            devices = list(manager)
         matches = _matching_devices(devices, target_name, session_directory)
 
         if len(matches) != 1:
@@ -154,7 +189,8 @@ def ring_device(apple_id: str, target_name: str, session_directory: Path) -> Non
                 "The configured Find My device was not returned exactly once"
             )
 
-        matches[0].play_sound(subject="Find My alert requested through Alexa")
+        with _apple_failures():
+            matches[0].play_sound(subject="Find My alert requested through Alexa")
     finally:
         # Device properties can restart pyicloud's daemon monitor, so stop and
         # join it only after every Find My operation has finished.

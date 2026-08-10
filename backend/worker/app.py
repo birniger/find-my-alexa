@@ -174,7 +174,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             print("Find My worker warning: session_refresh_failed")
     except Exception as exc:  # noqa: BLE001
         category = _failure_category(exc)
-        print(f"Find My worker failed: {category}")
+        # The exception class name is safe to log and is the only clue to what
+        # the catch-all category actually was. Class names never contain Apple
+        # IDs, device IDs, cookies, passwords, or locations, and the setup
+        # worker already logs failures this way.
+        print(f"Find My worker failed: {category} ({type(exc).__name__})")
         _post_runner_event(message, category, category)
         if action == "health_check" and category == "reauthentication_required":
             return {"processed": 1}

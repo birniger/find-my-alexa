@@ -120,6 +120,13 @@ class SetupWorkerTests(unittest.TestCase):
             devices = [device]
             two_factor_delivery_method = "sms"
             sms_requests = 0
+            # pyicloud's validate_2fa_code calls trust_session internally, so a
+            # verified session is trusted by the time setup continues.
+            is_trusted_session = True
+
+            @staticmethod
+            def trust_session():
+                return True
 
             def __init__(self, directory):
                 session_path = Path(directory) / "account.session"

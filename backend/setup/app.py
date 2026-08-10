@@ -312,6 +312,15 @@ def _run_setup(message: dict[str, Any]) -> None:
                     )
                 raise SetupFailed("Apple rejected that device code. Start again and use the newest code shown after tapping Allow.")
 
+        # scripts/authenticate.py makes this same check. validate_2fa_code calls
+        # trust_session internally but discards its result, so without this an
+        # untrusted session can be uploaded, pass its test ring on the live
+        # in-memory session, and then fail every ring made from the saved copy.
+        if not reusing_session and not api.is_trusted_session and not api.trust_session():
+            raise SetupFailed(
+                "Apple verified the code but did not trust this session. Start setup again."
+            )
+
         manager = api.devices
         try:
             devices = list(manager)

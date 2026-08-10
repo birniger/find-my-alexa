@@ -1,9 +1,11 @@
-# Find My Alexa / Find My Friends
+# Device Finder (Find My Alexa)
 
-A private Alexa developer skill that makes one configured iPhone play Apple's
-real Find My sound. The next product shape is **Find My Friends**, a separate
-invite-only web app for friends to set up and renew their own iPhones without
-using Terminal.
+A private Alexa developer skill that makes a linked user's own Apple devices
+play Apple's real Find My sound. Each account links its own Apple devices and
+gives each one a spoken Alexa name, so one Echo can ring any of them.
+
+The skill is invoked as **device finder**. The repository directory and the AWS
+stack are still named `find-my-alexa` from the original single-phone version.
 
 The source repository can be public, but the deployed Alexa skill and encrypted
 iCloud session must remain private.
@@ -182,7 +184,8 @@ Record the `SkillFunctionArn` and `SessionBucketName` stack outputs.
 In the [Alexa Developer Console](https://developer.amazon.com/alexa/console/ask):
 
 1. Select **Create Skill**.
-2. Skill name: `Basil Phone Finder`.
+2. Skill name: `Device Finder`. The interaction model's invocation name is
+   `device finder`, so anything else makes the spoken phrases below fail.
 3. Primary locale: **English (UK)**. The Echo/Alexa app locale must match.
 4. Experience/model: **Custom**.
 5. Hosting: **Provision your own**.
@@ -266,18 +269,22 @@ manual adaptation and are intentionally rejected by this setup flow.
    **Development**.
 2. In the Alexa app signed into the same Amazon account, go to
    **More → Skills & Games → Your Skills → Dev**.
-3. Enable **Basil Phone Finder** if it is not already enabled.
+3. Enable **Device Finder** if it is not already enabled.
 4. Make sure the Alexa app and target Echo use English (UK).
-5. Say:
+5. Complete account linking when the Alexa app prompts for it. Without a linked
+   account the skill has no access token, so it answers "Please link your Alexa
+   account to Device Finder" and never queues a ring. See
+   [Account linking](#account-linking).
+6. Say:
 
-   > Alexa, open Basil Phone Finder.
+   > Alexa, open Device Finder.
 
 Alexa should acknowledge immediately. The iPhone should begin its Find My alert
 after the queued worker runs.
 
 You can also test the intent directly:
 
-> Alexa, ask Basil Phone Finder to ring the phone.
+> Alexa, ask Device Finder to ring my phone.
 
 ## 6. Create “Alexa, where's Basil's phone?”
 
@@ -290,7 +297,8 @@ use a Custom action that issues the normal launch command:
 3. Under **When**, choose **Voice**.
 4. Enter: `where is Basil's phone`
 5. Under **Alexa Will**, choose **Custom**.
-6. Enter: `open Basil Phone Finder` without the `Alexa` wake word.
+6. Enter: `ask Device Finder to ring my phone` without the `Alexa` wake word.
+   Use the device's Alexa name from the web app to ring a specific one.
 7. Preview the action if the app offers that option.
 8. If requested, choose the Echo that should answer, then save.
 
@@ -300,6 +308,48 @@ Now say:
 
 > Alexa, where's Basil's phone?
 
+## Account linking
+
+Hosted mode carries no fallback: without account linking the skill has no
+access token, so it never reaches the Cloudflare app and never queues a ring.
+The Alexa app shows this as a "link your account" card; the Echo says "Please
+link your Alexa account to Device Finder".
+
+Alexa uses the authorization code grant and sends a client secret, so it needs
+its **own Auth0 application**. The web app's client is a public single-page
+app with no secret and cannot be reused here.
+
+1. In Auth0, create a **Regular Web Application** named `Device Finder Alexa`.
+2. In the Alexa Developer Console, open **Build → Account Linking** and choose
+   **Auth Code Grant**, then fill in:
+
+   | Field | Value |
+   | --- | --- |
+   | Authorization URI | `https://YOUR_AUTH0_DOMAIN/authorize` |
+   | Access Token URI | `https://YOUR_AUTH0_DOMAIN/oauth/token` |
+   | Client ID | the new Auth0 application's client ID |
+   | Client Secret | the new Auth0 application's client secret |
+   | Scope | `openid`, `profile`, `email`, `offline_access` |
+
+3. Under **Domain List**, add your Auth0 domain.
+4. Add a custom query parameter to the authorization URI:
+   `audience=https://find-my-friends-api`. **This step is not optional.**
+   Without an audience Auth0 returns an opaque access token instead of a JWT,
+   and the Worker rejects it with 401 on every ring.
+5. Copy the three redirect URLs Alexa lists at the bottom of the page into the
+   Auth0 application's **Allowed Callback URLs**.
+6. Enable **offline_access** in the Auth0 API settings so Alexa can refresh the
+   token; otherwise linking silently lapses and rings start failing again.
+7. In the Alexa app, open the skill and select **Link Account**.
+
+Confirm it worked by checking that `alexa_links.status` is `linked` for the
+account — a ring arriving with a linked token is the only thing that sets it:
+
+```sh
+cd hosted && npx wrangler d1 execute find-my-friends-prod --remote \
+  --command "SELECT status, linked_at FROM alexa_links"
+```
+
 ## Session renewal
 
 Apple decides when trusted sessions expire. If Alexa acknowledges but the phone
@@ -307,10 +357,14 @@ does not ring:
 
 1. Inspect the `RingWorkerFunction` CloudWatch log. Errors intentionally contain
    no Apple IDs, device IDs, locations, cookies, passwords, or raw Apple
-   responses.
+   responses. Each failure logs its category and the exception class name, for
+   example `operation_failed (PyiCloudNoDevicesException)`. The class name is
+   the only clue to what the catch-all category was, and it is safe to log.
 2. Check the `DeadLetterAlarmName` and `DeadLetterQueueUrl` stack outputs for a
    failed request. The alarm changes state when a request reaches the queue; add
    an SNS notification action in AWS if you want email or push notification.
+   **The alarm only re-fires after the dead-letter queue is emptied** — while
+   messages remain it stays latched in `ALARM` and reports nothing new.
 3. Rerun step 4 to replace the session in S3.
 
 No AWS redeployment is needed for session renewal.

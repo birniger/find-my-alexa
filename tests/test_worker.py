@@ -10,7 +10,7 @@ import unittest
 import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,6 +195,47 @@ class FindMyTests(unittest.TestCase):
                         Path(directory),
                     )
         device.play_sound.assert_called_once()
+
+    def test_find_my_rejecting_the_session_is_reported_as_reauthentication(self):
+        """The real cause of the 2026-08 outage.
+
+        Find My rejects a restored session that still passes get_auth_status,
+        so pyicloud retries the login and finds no stored password. Untranslated
+        this became the catch-all category, which the hosted app discarded, so
+        nobody was ever told to renew.
+        """
+
+        class PyiCloudFailedLoginException(Exception):
+            pass
+
+        api = Mock()
+        type(api).devices = PropertyMock(side_effect=PyiCloudFailedLoginException("No password set"))
+
+        with self.assertRaises(self.find_my.ReauthenticationRequired):
+            self.find_my._open_device_manager(api)
+
+    def test_pyicloud_no_devices_is_reported_as_device_not_found(self):
+        """pyicloud fails before this module can compare names, so translate it.
+
+        Untranslated it reaches the worker as the catch-all category, which is
+        what hid a total Find My outage from the dashboard.
+        """
+
+        class PyiCloudNoDevicesException(Exception):
+            pass
+
+        api = Mock()
+        type(api).devices = PropertyMock(side_effect=PyiCloudNoDevicesException())
+
+        with self.assertRaises(self.find_my.DeviceNotFound):
+            self.find_my._open_device_manager(api)
+
+    def test_other_device_manager_errors_are_not_swallowed(self):
+        api = Mock()
+        type(api).devices = PropertyMock(side_effect=ValueError("boom"))
+
+        with self.assertRaises(ValueError):
+            self.find_my._open_device_manager(api)
 
 
 class SessionStoreTests(unittest.TestCase):
