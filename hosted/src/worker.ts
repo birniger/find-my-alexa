@@ -1170,7 +1170,11 @@ async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Res
   const payload = await readJson(request);
   const host = stringField(payload, "host", 255);
   const from = stringField(payload, "from", 320);
-  const port = Number(stringField(payload, "port", 6));
+  // A JSON number is as valid here as a typed string, and stringField discards
+  // anything that is not a string — which rejected every port the form sent.
+  const port = typeof payload.port === "number"
+    ? payload.port
+    : Number(stringField(payload, "port", 6));
   if (!host) throw new HttpError(400, "A mail server host is required.");
   if (!from.includes("@")) throw new HttpError(400, "A valid sender address is required.");
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
