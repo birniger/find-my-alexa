@@ -177,6 +177,19 @@ Resources:
               Effect: Allow
               Action: s3:DeleteObject
               Resource: !Sub "${SessionBucket.Arn}/session/*"
+            # Read-only, and only for accounts that opted into unattended
+            # renewal. The setup worker is the sole writer.
+            - Sid: ReadOptInApplePasswords
+              Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/find-my/*"
+            - Sid: DecryptOptInApplePasswords
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
       Events:
         RingRequest:
           Type: SQS
@@ -204,6 +217,23 @@ Resources:
         # Adding a device reuses the stored session bundle instead of a fresh Apple sign-in.
         - S3ReadPolicy:
             BucketName: !Ref SessionBucket
+        - Statement:
+            # Write-only, and only reached when the account ticked the
+            # unattended-renewal box. Deliberately no ssm:GetParameter: the
+            # setup worker never needs to read a password back.
+            - Sid: StoreOptInApplePasswords
+              Effect: Allow
+              Action: ssm:PutParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/find-my/*"
+            - Sid: EncryptOptInApplePasswords
+              Effect: Allow
+              Action:
+                - kms:Encrypt
+                - kms:GenerateDataKey
+              Resource: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
       Events:
         SetupRequest:
           Type: SQS

@@ -353,6 +353,7 @@ async function startSetupFlow(options = {}) {
         <label>Apple account email<input name="appleId" type="email" autocomplete="off" autocapitalize="none" spellcheck="false" data-1p-ignore data-bwignore data-lpignore="true" data-protonpass-ignore="true" required></label>
         <label>Apple password<input name="password" type="password" autocomplete="off" data-1p-ignore data-bwignore data-lpignore="true" data-protonpass-ignore="true" required></label>
         <fieldset class="delivery-choice"><legend>Which code will you enter?</legend><label><input name="verificationMethod" type="radio" value="trusted_device" checked><span><strong>Apple device notification · Recommended</strong><small>Tap Allow on your trusted iPhone, iPad or Mac, then enter the code displayed there.</small></span></label><label><input name="verificationMethod" type="radio" value="sms"><span><strong>Text message fallback</strong><small>If a device prompt appears, do not interact with it. Wait for and use only the SMS code.</small></span></label></fieldset>
+        <fieldset class="delivery-choice"><legend>Renewing later</legend><label><input name="storeApplePassword" type="checkbox" value="yes"><span><strong>Keep my Apple password so renewals happen on their own</strong><small>Apple stops trusting a saved session after about a week. Stored encrypted in your own AWS account, it is used only to sign in again in the background. Apple still asks you for a verification code roughly monthly. Leave this off and you will renew by hand each time.</small></span></label></fieldset>
         <button class="primary" type="submit">Continue</button>
       </form>
       <p id="setupStatus" class="form-status"></p>
@@ -375,6 +376,7 @@ async function startSetupFlow(options = {}) {
           appleId: values.get("appleId"),
           password: values.get("password"),
           verificationMethod,
+          storeApplePassword: values.get("storeApplePassword") === "yes",
           runnerToken: setup.runnerToken,
         }),
       });

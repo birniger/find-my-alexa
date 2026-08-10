@@ -63,6 +63,60 @@ def _safe_local_directory(message: dict[str, Any]) -> Path:
     return Path(f"/tmp/find-my-alexa-session-{slug}")
 
 
+SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+
+
+def _password_parameter_name(message: dict[str, Any]) -> str | None:
+    """Derive the parameter path rather than trusting one from the message."""
+    if not message.get("storedApplePassword"):
+        return None
+    account_id = str(message.get("accountId") or "")
+    if not SAFE_IDENTIFIER.match(account_id):
+        return None
+    # One Apple sign-in covers every device it selected, so the setup worker
+    # holds a single credential per account.
+    return f"/find-my/{account_id}/apple-password"
+
+
+def _stored_password(message: dict[str, Any]) -> str | None:
+    """Read the Apple password of an account that opted into unattended renewal.
+
+    Only called after a session has already failed, so accounts that never
+    opted in cause no lookup and the password stays out of memory on the
+    overwhelming majority of invocations.
+    """
+    name = _password_parameter_name(message)
+    if not name:
+        return None
+
+    # boto3 is provided by the AWS Lambda runtime.
+    import boto3
+
+    try:
+        response = boto3.client("ssm").get_parameter(Name=name, WithDecryption=True)
+    except Exception:  # noqa: BLE001
+        print("Find My worker warning: stored_password_unavailable")
+        return None
+    value = response.get("Parameter", {}).get("Value")
+    return value if isinstance(value, str) and value else None
+
+
+def _run_operation(
+    action: str,
+    apple_id: str,
+    device_name: str,
+    session_directory: Path,
+    password: str | None = None,
+) -> None:
+    operation = check_device if action == "health_check" else ring_device
+    operation(
+        apple_id=apple_id,
+        target_name=device_name,
+        session_directory=session_directory,
+        password=password,
+    )
+
+
 def _post_runner_event(message: dict[str, Any], status: str, detail: str = "") -> None:
     callback_url = message.get("callbackUrl")
     token = os.environ.get("RUNNER_API_TOKEN", "").strip()
@@ -152,17 +206,19 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             session_directory = store.download()
             apple_id = _message_value(message, "appleId", env_key="APPLE_ID")
             device_name = _message_value(message, "deviceName", env_key="DEVICE_NAME")
-            if action == "health_check":
-                check_device(
-                    apple_id=apple_id,
-                    target_name=device_name,
-                    session_directory=session_directory,
-                )
-            else:
-                ring_device(
-                    apple_id=apple_id,
-                    target_name=device_name,
-                    session_directory=session_directory,
+            try:
+                _run_operation(action, apple_id, device_name, session_directory)
+            except ReauthenticationRequired:
+                # Accounts that opted in get one unattended retry: pyicloud
+                # sends the stored password with the trust token Apple issued
+                # at setup, so no verification code is needed until that token
+                # expires too.
+                password = _stored_password(message)
+                if not password:
+                    raise
+                print("Find My worker: retrying with the stored Apple password")
+                _run_operation(
+                    action, apple_id, device_name, session_directory, password
                 )
 
         # Persist refreshed cookies after a successful operation. Failure here

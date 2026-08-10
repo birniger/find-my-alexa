@@ -350,6 +350,32 @@ cd hosted && npx wrangler d1 execute find-my-friends-prod --remote \
   --command "SELECT status, linked_at FROM alexa_links"
 ```
 
+## Unattended renewal (opt-in)
+
+Apple stops trusting a saved Find My session after roughly a week, which
+normally means renewing by hand that often. An account can tick **Keep my Apple
+password** during setup to avoid most of those renewals.
+
+What that changes:
+
+- the setup worker writes the password to SSM Parameter Store as a
+  `SecureString` at `/find-my/{accountId}/apple-password`, only after a test
+  ring was confirmed, so an abandoned setup stores nothing;
+- when a session expires, the ring worker fetches it and calls
+  `authenticate()`. pyicloud sends the trust token Apple issued during setup
+  alongside the password, so Apple skips the verification code;
+- the password is read **only after a session has already failed**, so accounts
+  that never opted in cause no lookup at all.
+
+It raises the ceiling rather than removing it. When the trust token expires
+Apple asks for a verification code again, `requires_2fa` comes back true, and
+the usual `reauthentication_required` alert reaches the account owner.
+
+The box is **off by default and per account**. Invited testers are never opted
+in by a choice the owner made for their own account. IAM keeps the split: the
+setup worker may only `PutParameter` and the ring worker only `GetParameter`,
+both scoped to `/find-my/*`.
+
 ## Session renewal
 
 Apple decides when trusted sessions expire. If Alexa acknowledges but the phone

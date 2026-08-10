@@ -95,6 +95,38 @@ class FindMyTests(unittest.TestCase):
         _, kwargs = fake_pyicloud.PyiCloudService.call_args
         self.assertFalse(kwargs["authenticate"])
         self.assertIsNone(kwargs["password"])
+        api.authenticate.assert_not_called()
+
+    def test_stored_password_recovers_an_expired_session(self):
+        """Apple skips the verification code because pyicloud sends the trust
+        token it issued at setup, so opted-in accounts recover unattended."""
+        api = Mock()
+        api.get_auth_status.return_value = {"authenticated": False}
+        api.requires_2fa = False
+        api.devices = []
+        fake_pyicloud = Mock()
+        fake_pyicloud.PyiCloudService.return_value = api
+
+        with patch.dict(sys.modules, {"pyicloud": fake_pyicloud}):
+            self.find_my._open_api(
+                "basil@example.com", Path("/tmp/session"), "stored-secret"
+            )
+        _, kwargs = fake_pyicloud.PyiCloudService.call_args
+        self.assertEqual(kwargs["password"], "stored-secret")
+        api.authenticate.assert_called_once()
+
+    def test_expired_trust_token_still_asks_a_person(self):
+        api = Mock()
+        api.get_auth_status.return_value = {"authenticated": False}
+        api.requires_2fa = True
+        fake_pyicloud = Mock()
+        fake_pyicloud.PyiCloudService.return_value = api
+
+        with patch.dict(sys.modules, {"pyicloud": fake_pyicloud}):
+            with self.assertRaises(self.find_my.ReauthenticationRequired):
+                self.find_my._open_api(
+                    "basil@example.com", Path("/tmp/session"), "stored-secret"
+                )
 
     def test_monitor_stays_active_for_sound_then_stops_before_return(self):
         class Manager:
@@ -593,6 +625,7 @@ class WorkerHandlerTests(unittest.TestCase):
             apple_id="friend@example.com",
             target_name="Friend's iPhone",
             session_directory=Path("/tmp/find-my-alexa-session-job-1"),
+            password=None,
         )
 
     def test_health_check_uses_no_ring_validation(self):
@@ -648,6 +681,7 @@ class WorkerHandlerTests(unittest.TestCase):
             apple_id="friend@example.com",
             target_name="Friend's iPhone",
             session_directory=Path("/tmp/find-my-alexa-session-health-1"),
+            password=None,
         )
         find_my_module.ring_device.assert_not_called()
 

@@ -6,6 +6,7 @@ import io
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -20,8 +21,32 @@ POLL_SECONDS = 2.0
 SETUP_TIMEOUT_SECONDS = 9 * 60
 
 
+SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+
+
 class SetupFailed(RuntimeError):
     """A sanitized setup failure safe for Lambda logs."""
+
+
+def _store_apple_password(message: dict[str, Any], password: str) -> None:
+    """Persist the Apple password for an account that opted into unattended renewal.
+
+    Held once per account rather than per device, because one Apple sign-in
+    covers every device it selected. Written only after the person confirmed a
+    real test ring, so an abandoned setup leaves no credential behind.
+    """
+    account_id = str(message.get("accountId") or "")
+    if not SAFE_IDENTIFIER.match(account_id):
+        raise SetupFailed("Cannot store the Apple password for this account")
+
+    import boto3
+
+    boto3.client("ssm").put_parameter(
+        Name=f"/find-my/{account_id}/apple-password",
+        Value=password,
+        Type="SecureString",
+        Overwrite=True,
+    )
 
 
 def _runner_token() -> str:
@@ -277,6 +302,7 @@ def _public_failure_message(exc: Exception) -> str:
 def _run_setup(message: dict[str, Any]) -> None:
     with tempfile.TemporaryDirectory(prefix="find-my-friends-setup-") as directory:
         reusing_session = message.get("mode") == "reuse_session"
+        retained_password = ""
         if reusing_session:
             _post_event(message, "awaiting_credentials", "Opening your saved Apple session...")
             api = _open_saved_session(message, directory)
@@ -286,6 +312,10 @@ def _run_setup(message: dict[str, Any]) -> None:
             if not password:
                 raise SetupFailed("The Apple password was not provided")
             api = _create_api(message, directory, password)
+            # Kept only for an account that opted into unattended renewal. The
+            # api object holds the password until this function returns either
+            # way, so retaining it here adds no exposure.
+            retained_password = password if message.get("storeApplePassword") else ""
             del password
         if not reusing_session and api.requires_2fa:
             requested, delivery_method = _request_2fa(
@@ -361,6 +391,9 @@ def _run_setup(message: dict[str, Any]) -> None:
                 f"Confirm that {'the selected Apple device played a sound' if count == 1 else f'all {count} selected Apple devices played a sound'}.",
             )
             _wait_for(message, "confirmed_test_ring", lambda value: value in (1, True))
+            if retained_password:
+                _store_apple_password(message, retained_password)
+                retained_password = ""
             completed_device_ids = []
             for selection, device in selected_pairs:
                 apple_device_id = str(device.data.get("id") or "")

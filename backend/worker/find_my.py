@@ -64,6 +64,12 @@ def _apple_failures():
         yield
     except Exception as exc:  # noqa: BLE001
         name = type(exc).__name__
+        if name in ("PyiCloud2FARequiredException", "PyiCloud2SARequiredException"):
+            # Reached only when a stored password got past the login but the
+            # trust token has also expired. Only a person can answer this.
+            raise ReauthenticationRequired(
+                "Apple wants a new verification code"
+            ) from exc
         if name == "PyiCloudFailedLoginException":
             # Find My rejected the restored session, so pyicloud tried to log in
             # again and found no password. The worker deliberately stores none,
@@ -121,25 +127,53 @@ def _matching_devices(devices: list[Any], target_name: str, session_directory: P
     return matches
 
 
-def check_device(apple_id: str, target_name: str, session_directory: Path) -> None:
-    """Validate that the cached session can still see the configured device."""
+def _open_api(apple_id: str, session_directory: Path, password: str | None = None) -> Any:
+    """Open a usable pyicloud session, recovering with a password if one is held.
+
+    Without a password, authentication stays disabled: an expired session
+    surfaces as a renewal prompt rather than a silent login. With one, the
+    trust token Apple issued during setup lets this recover unattended,
+    because pyicloud sends that token alongside the password and Apple then
+    skips the verification code.
+    """
+    # Third-party diagnostics can contain account or HTTP response details.
     logging.getLogger("pyicloud").setLevel(logging.CRITICAL)
 
     from pyicloud import PyiCloudService
 
     api = PyiCloudService(
         apple_id,
-        password=None,
+        password=password or None,
         cookie_directory=str(session_directory),
         with_family=False,
         authenticate=False,
     )
     _install_http_timeout(api)
     auth_status = api.get_auth_status()
-    if not auth_status.get("authenticated") or auth_status.get("requires_2fa"):
+    if auth_status.get("authenticated") and not auth_status.get("requires_2fa"):
+        return api
+    if not password:
         raise ReauthenticationRequired(
             "The iCloud session expired; renew the Apple setup"
         )
+
+    with _apple_failures():
+        api.authenticate()
+    if getattr(api, "requires_2fa", False):
+        raise ReauthenticationRequired(
+            "Apple wants a new verification code; renew the Apple setup"
+        )
+    return api
+
+
+def check_device(
+    apple_id: str,
+    target_name: str,
+    session_directory: Path,
+    password: str | None = None,
+) -> None:
+    """Validate that the cached session can still see the configured device."""
+    api = _open_api(apple_id, session_directory, password)
 
     manager = _open_device_manager(api)
     try:
@@ -153,30 +187,19 @@ def check_device(apple_id: str, target_name: str, session_directory: Path) -> No
         _stop_device_monitor(manager)
 
 
-def ring_device(apple_id: str, target_name: str, session_directory: Path) -> None:
+def ring_device(
+    apple_id: str,
+    target_name: str,
+    session_directory: Path,
+    password: str | None = None,
+) -> None:
     """Validate the cached session and ring the exact configured device.
 
-    Authentication is intentionally disabled. If the cached token has expired,
-    the worker fails instead of attempting a login with a password stored in AWS.
+    A password is used only when the account opted into storing one. Without
+    it the worker fails rather than logging in, so an expired session asks a
+    person to renew instead of using a credential it was never given.
     """
-    # Third-party diagnostics can contain account or HTTP response details.
-    logging.getLogger("pyicloud").setLevel(logging.CRITICAL)
-
-    from pyicloud import PyiCloudService
-
-    api = PyiCloudService(
-        apple_id,
-        password=None,
-        cookie_directory=str(session_directory),
-        with_family=False,
-        authenticate=False,
-    )
-    _install_http_timeout(api)
-    auth_status = api.get_auth_status()
-    if not auth_status.get("authenticated") or auth_status.get("requires_2fa"):
-        raise ReauthenticationRequired(
-            "The iCloud session expired; rerun scripts/authenticate.py"
-        )
+    api = _open_api(apple_id, session_directory, password)
 
     manager = _open_device_manager(api)
     try:

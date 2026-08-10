@@ -9,6 +9,7 @@ type Account = {
   displayName: string;
   role: "owner" | "user";
   status: "active" | "suspended";
+  storeApplePassword: boolean;
 };
 type AccountRow = {
   id: string;
@@ -17,6 +18,7 @@ type AccountRow = {
   display_name: string;
   role: "owner" | "user";
   status: "active" | "suspended";
+  store_apple_password: number;
 };
 type DeviceRow = {
   id: string;
@@ -78,8 +80,11 @@ function mapAccount(row: AccountRow): Account {
     displayName: row.display_name,
     role: row.role,
     status: row.status,
+    storeApplePassword: Boolean(row.store_apple_password),
   };
 }
+
+const ACCOUNT_COLUMNS = "id, auth_subject, email, display_name, role, status, store_apple_password";
 
 async function verifyIdentity(request: Request, env: Env): Promise<Identity> {
   if (!authConfigured(env)) throw new HttpError(503, "Sign-in is not configured yet.");
@@ -127,7 +132,7 @@ async function resolveProfile(identity: Identity, env: Env): Promise<{ email: st
 
 async function ensureAccount(identity: Identity, env: Env): Promise<Account> {
   const existing = await env.DB.prepare(
-    "SELECT id, auth_subject, email, display_name, role, status FROM accounts WHERE auth_subject = ?",
+    `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE auth_subject = ?`,
   )
     .bind(identity.subject)
     .first<AccountRow>();
@@ -160,7 +165,15 @@ async function ensureAccount(identity: Identity, env: Env): Promise<Account> {
     );
   }
   await env.DB.batch(statements);
-  return { id: accountId, authSubject: identity.subject, email: profile.email, displayName: profile.displayName, role, status: "active" };
+  return {
+    id: accountId,
+    authSubject: identity.subject,
+    email: profile.email,
+    displayName: profile.displayName,
+    role,
+    status: "active",
+    storeApplePassword: false,
+  };
 }
 
 async function requireAccount(request: Request, env: Env): Promise<Account> {
@@ -301,6 +314,9 @@ async function dispatchRunnerJob(
       callbackUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/api/runner/events`,
       appleId: device.apple_account_email,
       deviceName: device.label,
+      // Tells the runner it may fall back to the stored Apple password after a
+      // session expires. It never carries the password itself.
+      storedApplePassword: account.storeApplePassword,
       sessionBucket: bucket,
       sessionPrefix: prefix,
     },
@@ -327,6 +343,7 @@ async function dispatchSetupJob(
   password: string,
   verificationMethod: "sms" | "trusted_device",
   reuse?: { bucket: string; prefix: string },
+  storeApplePassword = false,
 ): Promise<void> {
   if (!runnerQueueConfigured(env) || !env.SETUP_QUEUE_URL) {
     throw new HttpError(503, "Apple setup relay is not configured yet.");
@@ -343,6 +360,7 @@ async function dispatchSetupJob(
       appleId,
       password,
       verificationMethod,
+      storeApplePassword,
       sessionBucket: env.SESSION_BUCKET,
       sessionPrefix: sessionPrefix(account.id, deviceId),
       ...(reuse ? { mode: "reuse_session", reuseSessionBucket: reuse.bucket, reuseSessionPrefix: reuse.prefix } : {}),
@@ -519,6 +537,9 @@ async function handleSetupUpdate(request: Request, env: Env, account: Account, s
       .bind(setupId, runnerTokenHash)
       .first<{ id: string }>();
     if (!tokenMatch) throw new HttpError(403, "Setup token is invalid.");
+    // Opting in is per setup attempt and defaults to off, so an account only
+    // holds a password because someone ticked the box on this screen.
+    const storeApplePassword = payload.storeApplePassword === true;
     await env.DB.batch([
       env.DB.prepare(
         [
@@ -527,9 +548,14 @@ async function handleSetupUpdate(request: Request, env: Env, account: Account, s
           "runner_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         ].join(" "),
       ).bind(appleId, verificationMethod, setupId),
+      env.DB.prepare("UPDATE accounts SET store_apple_password = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(storeApplePassword ? 1 : 0, account.id),
     ]);
     await dispatchOrCloseSession(env, setupId, () =>
-      dispatchSetupJob(env, setupId, runnerToken, account, session.device_id as string, appleId, password, verificationMethod),
+      dispatchSetupJob(
+        env, setupId, runnerToken, account, session.device_id as string,
+        appleId, password, verificationMethod, undefined, storeApplePassword,
+      ),
     );
     return json({ status: "awaiting_2fa" });
   }
@@ -888,7 +914,7 @@ async function enqueueDailyHealthChecks(env: Env): Promise<void> {
 
   for (const device of result.results) {
     const account = await env.DB.prepare(
-      "SELECT id, auth_subject, email, display_name, role, status FROM accounts WHERE id = ? AND status = 'active'",
+      `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = ? AND status = 'active'`,
     )
       .bind(device.account_id)
       .first<AccountRow>();
@@ -982,7 +1008,7 @@ async function handleOwnerStatus(request: Request, env: Env): Promise<Response> 
 async function ownerAccount(request: Request, env: Env): Promise<Account> {
   if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
   const owner = await env.DB.prepare(
-    "SELECT id, auth_subject, email, display_name, role, status FROM accounts WHERE email_normalized = ? AND role = 'owner'",
+    `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE email_normalized = ? AND role = 'owner'`,
   )
     .bind(normalizeEmail(env.OWNER_EMAIL))
     .first<AccountRow>();
