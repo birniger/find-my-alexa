@@ -291,10 +291,18 @@ def _candidate_id(device: Any) -> str:
     return hashlib.sha256(apple_device_id.encode("utf-8")).hexdigest()[:32]
 
 
-def _public_failure_message(exc: Exception) -> str:
+def _public_failure_message(exc: Exception, reusing_session: bool = False) -> str:
     if isinstance(exc, SetupFailed):
         return str(exc)
     if type(exc).__name__ == "PyiCloudFailedLoginException":
+        if reusing_session:
+            # Adding a device asks for no password, so telling someone to check
+            # one sends them looking for a field that was never on screen. The
+            # saved session is what Apple rejected.
+            return (
+                "Apple no longer accepts the saved sign-in. "
+                "Choose Set up devices to sign in to Apple again."
+            )
         return "Apple did not accept this sign-in. Check the Apple email and password, then try again in a few minutes."
     return "Apple setup could not connect. Please try again in a few minutes."
 
@@ -431,7 +439,11 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         failure_kind = f"http_{exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
         try:
-            _post_event(message, "failed", _public_failure_message(exc))
+            _post_event(
+                message,
+                "failed",
+                _public_failure_message(exc, message.get("mode") == "reuse_session"),
+            )
         except (OSError, urllib.error.URLError, KeyError):
             print("Find My setup warning: callback_failed")
             raise SetupFailed("Find My setup failed before its callback completed") from None
