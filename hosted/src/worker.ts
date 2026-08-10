@@ -862,6 +862,56 @@ type SmtpSettings = {
 
 const SMTP_KEYS = ["smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_from", "smtp_from_name", "smtp_secure"] as const;
 
+// The mail password has to live in the database to be settable from a panel,
+// so it is encrypted with a key held as a Worker secret. Cloudflare will not
+// hand a secret back through its API, so a D1 export reveals nothing on its
+// own. It is not proof against someone who can deploy code — they could read
+// the key — but it removes the passive-read exposure that plaintext has.
+const SECRET_PREFIX = "v1.";
+
+const bytesFromHex = (value: string): Uint8Array<ArrayBuffer> => {
+  const pairs = value.match(/.{1,2}/g) ?? [];
+  const bytes = new Uint8Array(new ArrayBuffer(pairs.length));
+  pairs.forEach((pair, index) => { bytes[index] = Number.parseInt(pair, 16); });
+  return bytes;
+};
+
+async function settingsKey(env: Env): Promise<CryptoKey | null> {
+  const raw = (env as Env & { SETTINGS_KEY?: string }).SETTINGS_KEY?.trim();
+  if (!raw) return null;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+async function encryptSecret(env: Env, value: string): Promise<string> {
+  const key = await settingsKey(env);
+  if (!key) throw new HttpError(503, "Set the SETTINGS_KEY secret before saving a mail password.");
+  const iv = crypto.getRandomValues(new Uint8Array(new ArrayBuffer(12)));
+  const sealed = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(value));
+  return `${SECRET_PREFIX}${hex(iv.buffer)}.${hex(sealed)}`;
+}
+
+async function decryptSecret(env: Env, stored: string): Promise<string> {
+  // Anything without the marker predates encryption and is read as-is, so an
+  // existing configuration keeps working until it is next saved.
+  if (!stored.startsWith(SECRET_PREFIX)) return stored;
+  const key = await settingsKey(env);
+  if (!key) return "";
+  const [, ivHex, dataHex] = stored.split(".");
+  if (!ivHex || !dataHex) return "";
+  try {
+    const opened = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: bytesFromHex(ivHex) },
+      key,
+      bytesFromHex(dataHex),
+    );
+    return new TextDecoder().decode(opened);
+  } catch {
+    console.error("Stored mail password could not be decrypted; SETTINGS_KEY may have changed");
+    return "";
+  }
+}
+
 async function readSettings(env: Env, keys: readonly string[]): Promise<Record<string, string>> {
   const placeholders = keys.map(() => "?").join(", ");
   const result = await env.DB.prepare(`SELECT key, value FROM app_settings WHERE key IN (${placeholders})`)
@@ -882,7 +932,7 @@ async function smtpSettings(env: Env): Promise<SmtpSettings | null> {
     host,
     port,
     username: stored.smtp_username ?? "",
-    password: stored.smtp_password ?? "",
+    password: await decryptSecret(env, stored.smtp_password ?? ""),
     from,
     fromName: stored.smtp_from_name || "Device Finder",
     secure: stored.smtp_secure !== "0",
@@ -1141,7 +1191,7 @@ async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Res
   // An empty password means "leave the stored one alone", so re-saving the
   // form without retyping it does not wipe a working configuration.
   const password = stringField(payload, "password", 500);
-  if (password) entries.smtp_password = password;
+  if (password) entries.smtp_password = await encryptSecret(env, password);
 
   await writeSettings(env, entries);
   return json({ status: "saved", passwordSet: Boolean(password) || Boolean((await readSettings(env, ["smtp_password"])).smtp_password) });
