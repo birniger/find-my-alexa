@@ -100,6 +100,12 @@ def _queue_cloudflare_ring_request(event: dict[str, Any]) -> str | None:
         headers={
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
+            # Cloudflare's browser-integrity check answers urllib's default
+            # agent with 403 error 1010 before the Worker ever sees the
+            # request, which reaches the user as "link your account again"
+            # and makes correct account linking look broken. The runner
+            # Lambda sets its own agent for the same reason.
+            "User-Agent": "DeviceFinderSkill/1.0",
         },
     )
     try:

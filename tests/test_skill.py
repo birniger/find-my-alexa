@@ -99,6 +99,10 @@ class SkillTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://find.example/api/ring/request")
         self.assertEqual(request.headers["Authorization"], "Bearer auth0-token")
+        # urllib's default agent is answered by Cloudflare's browser-integrity
+        # check with 403 error 1010 before the Worker sees the request, which
+        # the user hears as "link your account again".
+        self.assertEqual(request.headers["User-agent"], "DeviceFinderSkill/1.0")
 
     def test_cloudflare_failure_does_not_fall_back_to_legacy_queue(self):
         event = self.event({"type": "LaunchRequest"})
