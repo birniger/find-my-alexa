@@ -19,6 +19,8 @@ interface Env {
   SESSION_BUCKET?: string;
   PUBLIC_BASE_URL: string;
   MY_BUILDS_STATUS_TOKEN: string;
+  /** The admin host's token. Stands in for the owner; see adminHostAuthorized. */
+  ADMIN_PANEL_TOKEN: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;

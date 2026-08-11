@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "device-finder-admin",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-06",
+  // Access applies per hostname, and a preview URL is a different hostname —
+  // one no policy covers. The Worker would still fail closed there, but there
+  // is no reason to publish a door that only the fallback is holding shut.
+  "preview_urls": false,
+  // Committed, unlike hosted/wrangler.jsonc. Nothing here is secret — the
+  // Access audience and team domain are public identifiers, and the panel
+  // token is a Worker secret. Keeping it in the repo is what stops it drifting
+  // out of sync with what is actually deployed.
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "https://birniger.cloudflareaccess.com",
+    "POLICY_AUD": "REPLACE_WITH_THE_ADMIN_APPLICATION_AUD",
+    "OWNER_EMAIL": "basil.irniger@gmail.com"
+  },
+  "services": [
+    {
+      "binding": "BUILD",
+      "service": "find-my-friends-app"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

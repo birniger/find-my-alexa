@@ -210,6 +210,26 @@ async function accountById(env: Env, accountId: string): Promise<Account | null>
 }
 
 async function requireAccount(request: Request, env: Env): Promise<Account> {
+  // The admin host proxies here after Cloudflare Access has identified the
+  // owner, and its token arrives as a bearer — so it is resolved before the two
+  // checks below, which would otherwise mistake it for an Alexa access token
+  // and then fail it as an Auth0 JWT.
+  //
+  // Deliberately not MY_BUILDS_STATUS_TOKEN. That token exists to read status
+  // and register push subscriptions; letting it through here would quietly
+  // promote it to acting as the owner on every tester endpoint too.
+  if (adminHostAuthorized(request, env)) {
+    const owner = await env.DB.prepare(
+      `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE email_normalized = ? AND role = 'owner'`,
+    )
+      .bind(normalizeEmail(env.OWNER_EMAIL))
+      .first<AccountRow>();
+    if (!owner) throw new HttpError(409, "No owner account exists yet. Sign in to Device Finder once first.");
+    const account = mapAccount(owner);
+    if (account.status !== "active") throw new HttpError(403, "The owner account is suspended.");
+    return account;
+  }
+
   // A session issued by this app is tried first because it is the route being
   // migrated to. Auth0 stays accepted for the whole migration window, so an
   // account can arrive by either and no one is ever locked out mid-change.
@@ -1225,12 +1245,21 @@ function myBuildsAuthorized(request: Request, env: Env): boolean {
 }
 
 /**
+ * The admin host's own token, kept separate from My Builds' so the two have
+ * separate blast radii: this one stands in for the owner, that one does not.
+ */
+function adminHostAuthorized(request: Request, env: Env): boolean {
+  return !!env.ADMIN_PANEL_TOKEN &&
+    request.headers.get("authorization") === `Bearer ${env.ADMIN_PANEL_TOKEN}`;
+}
+
+/**
  * These are the owner's settings and the owner is signed in, so an owner
- * session counts as much as the panel's shared token. Accepting both is what
- * lets the same endpoints serve the admin page and My Builds.
+ * session counts as much as a shared token. Accepting all three is what lets
+ * the same endpoints serve the admin host, the admin page and My Builds.
  */
 async function requireOwnerOrPanel(request: Request, env: Env): Promise<void> {
-  if (myBuildsAuthorized(request, env)) return;
+  if (myBuildsAuthorized(request, env) || adminHostAuthorized(request, env)) return;
   const sessionAccountId = await accountIdFromSession(request, env);
   if (sessionAccountId) {
     const account = await accountById(env, sessionAccountId);
