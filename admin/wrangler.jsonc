@@ -19,7 +19,7 @@
   "services": [
     {
       "binding": "BUILD",
-      "service": "find-my-friends-app"
+      "service": "device-finder"
     }
   ],
   "observability": {

@@ -1,0 +1,7 @@
+{
+  "name": "find-my-friends-app",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-06",
+  "preview_urls": false,
+  "observability": { "enabled": true }
+}

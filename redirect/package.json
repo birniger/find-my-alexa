@@ -1,0 +1,13 @@
+{
+  "name": "device-finder-redirect",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "WRANGLER_LOG_PATH=.wrangler/wrangler.log wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260804.1",
+    "wrangler": "4.119.0"
+  }
+}

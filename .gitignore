@@ -21,3 +21,5 @@ target.json
 session-bundle.zip
 samconfig.toml
 /skill-package/skill.json
+redirect/.wrangler/
+redirect/node_modules/
