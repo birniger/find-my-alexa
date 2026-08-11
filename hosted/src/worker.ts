@@ -1020,9 +1020,6 @@ async function smtpSettings(env: Env): Promise<SmtpSettings | null> {
   };
 }
 
-const escapeHtml = (value: string): string =>
-  value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-
 async function sendEmailViaSmtp(smtp: SmtpSettings, to: string, title: string, body: string): Promise<void> {
   // Port 25 is blocked outbound from Workers; 587 and 465 are the usable ones.
   // Imported here rather than at module scope: it reaches for
@@ -1040,8 +1037,11 @@ async function sendEmailViaSmtp(smtp: SmtpSettings, to: string, title: string, b
       from: { name: smtp.fromName, email: smtp.from },
       to: { email: to },
       subject: title,
+      // Plain text only, deliberately. A multipart message also carried an
+      // HTML alternative built as a single <p>, which collapsed every newline;
+      // clients prefer the HTML part, so the line breaks we write here were
+      // being thrown away and the link arrived buried mid-paragraph.
       text: body,
-      html: `<p>${escapeHtml(body)}</p>`,
     });
   } finally {
     await mailer.close().catch(() => undefined);
@@ -1051,8 +1051,22 @@ async function sendEmailViaSmtp(smtp: SmtpSettings, to: string, title: string, b
 async function sendEmailNotification(env: Env, email: string, title: string, body: string): Promise<boolean> {
   const smtp = await smtpSettings(env);
   if (!smtp) return false;
+  const home = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  // The stored body is written for a push notification, where a URL is noise
+  // and there is a tap target. An email has neither, so it gets the link and
+  // the "why am I reading this" lines that a notification does not need.
+  const letter = [
+    body,
+    "",
+    `Open Device Finder: ${home}`,
+    "",
+    "Basil",
+    "",
+    `Device Finder · ${home}`,
+    "You are getting this because a notification could not reach your devices.",
+  ].join("\n");
   try {
-    await sendEmailViaSmtp(smtp, email, title, body);
+    await sendEmailViaSmtp(smtp, email, title, letter);
     return true;
   } catch (error) {
     console.error("SMTP delivery failed", error instanceof Error ? error.message : error);
@@ -1312,6 +1326,10 @@ async function sendPasswordLink(
   const token = await createPasswordToken(env, account.id, purpose);
   const link = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/?set-password=${encodeURIComponent(token)}`;
   const name = account.display_name ? ` ${account.display_name}` : "";
+  const home = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+  // One shape for both: why it arrived, the action, what the link costs you,
+  // and how to recover if it expires. The last two lines say who sent it and
+  // why, which is what stops a transactional mail reading like a phish.
   const body = purpose === "set"
     ? [
         `Hi${name},`,
@@ -1322,10 +1340,15 @@ async function sendPasswordLink(
         "Set your password:",
         link,
         "",
-        `That link works once and lasts ${TOKEN_VALID_HOURS} hours.`,
+        `That link works once and lasts ${TOKEN_VALID_HOURS} hours. If it expires,`,
+        "open Device Finder and choose \"Forgotten your password?\" for another.",
+        "",
         "There is no rush — your current sign-in keeps working either way.",
         "",
         "Basil",
+        "",
+        `Device Finder · ${home}`,
+        "You are getting this because you have a Device Finder account.",
       ]
     : [
         `Hi${name},`,
@@ -1333,10 +1356,16 @@ async function sendPasswordLink(
         "Here is the link to set a new Device Finder password:",
         link,
         "",
-        `It works once and lasts ${TOKEN_VALID_HOURS} hours.`,
+        `It works once and lasts ${TOKEN_VALID_HOURS} hours. If it expires, ask for`,
+        "another from the sign-in page.",
+        "",
         "If you did not ask for this, nothing has changed and you can ignore it.",
+        "Your current password still works and nobody has been let in.",
         "",
         "Basil",
+        "",
+        `Device Finder · ${home}`,
+        "You are getting this because someone asked to reset this account's password.",
       ];
   try {
     await sendEmailViaSmtp(
@@ -1772,7 +1801,15 @@ async function handleOwnerEmailTest(request: Request, env: Env): Promise<Respons
       smtp,
       to,
       "Device Finder test email",
-      "Mail is working. Renewal alerts will arrive here whenever a push notification cannot reach you.",
+      [
+        "Mail is working.",
+        "",
+        "This address will receive renewal alerts whenever a push notification",
+        "cannot reach your devices — which is the only mail Device Finder sends",
+        "you unprompted.",
+        "",
+        "Nothing else to do. You sent this from the Device Finder admin page.",
+      ].join("\n"),
     );
   } catch (error) {
     // The mail server's own words are the whole point of a test button.

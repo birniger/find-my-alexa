@@ -1,5 +1,7 @@
 const app = document.querySelector("#app");
 let activeSetupPoll = "";
+// The most recently created invite, kept across the redraw that follows it.
+let lastInvite = null;
 let authClient = null;
 let accessToken = "";
 let config = null;
@@ -11,6 +13,16 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character
   "'": "&#39;",
   '"': "&quot;",
 })[character] ?? character);
+
+// Status lines carry a tone so a failure reads as one. Everything rendered in
+// the same muted grey before this, which made a rejected save look like a
+// completed one.
+function setStatus(node, message, tone = "info") {
+  const target = typeof node === "string" ? document.querySelector(node) : node;
+  if (!target) return;
+  target.textContent = message;
+  target.dataset.tone = tone;
+}
 
 async function loadConfig() {
   const response = await fetch("/api/config");
@@ -81,12 +93,12 @@ function renderSetPassword(token) {
       <div class="panel main-panel">
         <p class="eyebrow">Your account</p>
         <h1>Choose a password.</h1>
-        <p class="lede">Device Finder has its own sign-in now. This password is the one you will use from here on.</p>
+        <p class="lede">This is the one you will use from now on. Your Apple devices and their Alexa names are exactly as you left them.</p>
         <form id="setPasswordForm" class="setup-form" autocomplete="off">
           <label>New password<input name="password" type="password" autocomplete="new-password" minlength="10" required></label>
           <button class="primary" type="submit">Save and sign in</button>
         </form>
-        <p id="setPasswordStatus" class="form-status">At least 10 characters.</p>
+        <p id="setPasswordStatus" class="form-status">At least 10 characters. A phrase you will remember beats something short and clever.</p>
       </div>
     </section>
   `;
@@ -95,7 +107,7 @@ function renderSetPassword(token) {
     const button = event.currentTarget.querySelector("button");
     const status = document.querySelector("#setPasswordStatus");
     button.disabled = true;
-    status.textContent = "Saving...";
+    setStatus(status, "Saving...");
     try {
       await api("/api/auth/password/set", {
         method: "POST",
@@ -105,7 +117,7 @@ function renderSetPassword(token) {
       window.history.replaceState({}, document.title, window.location.pathname);
       await refresh();
     } catch (error) {
-      status.textContent = error.message;
+      setStatus(status, error.message, "error");
       button.disabled = false;
     }
   });
@@ -119,7 +131,7 @@ function bindPasswordSignIn() {
     const status = document.querySelector("#passwordSignInStatus");
     const values = new FormData(form);
     button.disabled = true;
-    status.textContent = "Signing in...";
+    setStatus(status, "Signing in...");
     try {
       await api("/api/auth/sign-in", {
         method: "POST",
@@ -127,26 +139,31 @@ function bindPasswordSignIn() {
       });
       await refresh();
     } catch (error) {
-      status.textContent = error.message;
+      setStatus(status, error.message, "error");
       button.disabled = false;
     }
   });
 
-  document.querySelector("#forgotPassword")?.addEventListener("click", async () => {
+  document.querySelector("#forgotPassword")?.addEventListener("click", async (event) => {
+    const link = event.currentTarget;
     const status = document.querySelector("#passwordSignInStatus");
-    const email = new FormData(document.querySelector("#passwordSignInForm")).get("email");
+    const form = document.querySelector("#passwordSignInForm");
+    const email = new FormData(form).get("email");
     if (!email) {
-      status.textContent = "Enter your email address first, then ask for a link.";
+      setStatus(status, "Enter your email address first, then ask for a link.", "error");
+      form.querySelector("input[name='email']")?.focus();
       return;
     }
-    status.textContent = "Sending...";
+    link.disabled = true;
+    setStatus(status, "Sending...");
     try {
       await api("/api/auth/password/request", { method: "POST", body: JSON.stringify({ email }) });
       // Deliberately the same words whether or not that address has an account.
-      status.textContent = "If that address has an account, a link is on its way.";
+      setStatus(status, "If that address has an account, a link is on its way.");
     } catch (error) {
-      status.textContent = error.message;
+      setStatus(status, error.message, "error");
     }
+    link.disabled = false;
   });
 }
 
@@ -156,30 +173,29 @@ function renderSignedOut() {
       <a class="brand" href="/"><span class="mark"></span><span>Device Finder</span></a>
       <span class="beta-pill">Private beta</span>
     </header>
-    <section class="hero">
-      <div>
+    <section class="gate-layout">
+      <div class="gate-copy">
         <p class="eyebrow">Private beta</p>
-        <h1>Ring your own Apple devices with Alexa.</h1>
-        <p class="lede">Set up your Apple devices once, save this web app, and get renewal alerts before Alexa goes quiet.</p>
+        <h1>Ring your Apple devices with Alexa.</h1>
+        <p class="lede">Set your devices up once, then just ask. If Apple ever stops trusting the connection, you hear about it before Alexa goes quiet.</p>
+        <ul class="gate-points">
+          <li><strong>Only your devices.</strong> Each tester connects their own Apple account.</li>
+          <li><strong>Push, then email.</strong> ${config.emailFallbackAvailable ? "If a notification cannot reach you, an email does." : "Notifications on the devices you enable them on."}</li>
+          <li><strong>Invite only.</strong> Ask Basil if you have not had one.</li>
+        </ul>
       </div>
-      <button id="signIn" class="primary" type="button">Sign in</button>
-    </section>
-    <section class="panel main-panel">
-      <p class="eyebrow">Sign in with your password</p>
-      <form id="passwordSignInForm" class="setup-form" autocomplete="on">
-        <label>Email<input name="email" type="email" autocomplete="username" required></label>
-        <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-        <div class="actions">
+      <div class="panel gate-panel">
+        <p class="eyebrow">Sign in</p>
+        <form id="passwordSignInForm" class="setup-form" autocomplete="on">
+          <label>Email<input name="email" type="email" autocomplete="username" required></label>
+          <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
           <button class="primary" type="submit">Sign in</button>
-          <button id="forgotPassword" class="secondary" type="button">Email me a link</button>
-        </div>
-      </form>
-      <p id="passwordSignInStatus" class="form-status"></p>
-    </section>
-    <section class="status-grid">
-      <article><span>Account</span><strong>Separate login</strong><small>Create a Device Finder username and password; Soundbox credentials stay separate.</small></article>
-      <article><span>Alerts</span><strong>Push first</strong><small>${config.emailFallbackAvailable ? "Email follows only when push cannot reach you." : "Email fallback can be added after a sending domain is connected."}</small></article>
-      <article><span>Access</span><strong>Invite only</strong><small>Each invited tester connects only their own Apple account and devices.</small></article>
+        </form>
+        <p id="passwordSignInStatus" class="form-status"></p>
+        <button id="forgotPassword" class="text-button" type="button">Forgotten your password?</button>
+        <div class="gate-divider"><span>or</span></div>
+        <button id="signIn" class="secondary" type="button">Use the old sign-in</button>
+      </div>
     </section>
   `;
   document.querySelector("#signIn")?.addEventListener("click", () => void authClient.loginWithRedirect({
@@ -307,15 +323,15 @@ function renderDashboard(status) {
   document.querySelectorAll("[data-ring-device]").forEach((button) => button.addEventListener("click", async () => {
     const deviceId = button.dataset.ringDevice;
     const rowStatus = document.querySelector(`[data-device-status="${CSS.escape(deviceId)}"]`);
-    if (rowStatus) rowStatus.textContent = "";
+    setStatus(rowStatus, "");
     button.disabled = true;
     button.textContent = "Ringing";
     try {
       await api("/api/ring/request", { method: "POST", body: JSON.stringify({ deviceId }) });
-      if (rowStatus) rowStatus.textContent = "Ring requested.";
-      window.setTimeout(() => { if (rowStatus) rowStatus.textContent = ""; }, 4000);
+      setStatus(rowStatus, "Ring requested.");
+      window.setTimeout(() => setStatus(rowStatus, ""), 4000);
     } catch (error) {
-      if (rowStatus) rowStatus.textContent = error.message;
+      setStatus(rowStatus, error.message, "error");
     }
     button.textContent = "Ring";
     button.disabled = false;
@@ -383,10 +399,7 @@ const SETTINGS_MARKUP = `
     <p id="linkingStatus" class="form-status" aria-live="polite"></p>
   </section>`;
 
-const settingsStatus = (id, message) => {
-  const node = document.querySelector(id);
-  if (node) node.textContent = message;
-};
+const settingsStatus = (id, message, tone = "info") => setStatus(id, message, tone);
 
 const settingsField = (label, name, value, type = "text", placeholder = "") =>
   `<label>${escapeHtml(label)}<input name="${escapeHtml(name)}" type="${type}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off"></label>`;
@@ -437,7 +450,7 @@ async function renderMailSettings() {
       });
       settingsStatus("#mailStatus", "Saved. Send a test to confirm the server accepts it.");
     } catch (error) {
-      settingsStatus("#mailStatus", error.message);
+      settingsStatus("#mailStatus", error.message, "error");
     }
   });
 
@@ -447,7 +460,7 @@ async function renderMailSettings() {
       const sent = await api("/api/owner/email/test", { method: "POST", body: "{}" });
       settingsStatus("#mailStatus", `Sent to ${sent.to}. Check spam too on a new sending address.`);
     } catch (error) {
-      settingsStatus("#mailStatus", error.message);
+      settingsStatus("#mailStatus", error.message, "error");
     }
   });
 }
@@ -494,7 +507,7 @@ async function renderLinkingSettings() {
         config = { ...config, redirectUris };
         settingsStatus("#linkingStatus", `Saved ${redirectUris.length} address${redirectUris.length === 1 ? "" : "es"}.`);
       } catch (error) {
-        settingsStatus("#linkingStatus", error.message);
+        settingsStatus("#linkingStatus", error.message, "error");
       }
     });
 
@@ -507,7 +520,7 @@ async function renderLinkingSettings() {
         draw(created.clientSecret);
         settingsStatus("#linkingStatus", "Copy the secret now — it is stored hashed and cannot be shown again.");
       } catch (error) {
-        settingsStatus("#linkingStatus", error.message);
+        settingsStatus("#linkingStatus", error.message, "error");
       }
     });
   };
@@ -540,6 +553,15 @@ function renderAdmin(summary, accounts, invites) {
           <button class="primary" type="submit">Create invite</button>
         </form>
         <p id="inviteStatus" class="form-status"></p>
+        ${lastInvite ? `
+          <dl class="value-list">
+            <div><dt>Invite link for ${escapeHtml(lastInvite.email)}</dt>
+              <dd><code>${escapeHtml(lastInvite.inviteUrl)}</code>
+              <button class="secondary" type="button" data-copy="${escapeHtml(lastInvite.inviteUrl)}">Copy</button></dd></div>
+            <div><dt>Add this address to the Amazon beta</dt>
+              <dd><code>${escapeHtml(lastInvite.amazonEmail)}</code>
+              <button class="secondary" type="button" data-copy="${escapeHtml(lastInvite.amazonEmail)}">Copy</button></dd></div>
+          </dl>` : ""}
       </section>
       <section class="panel"><header class="section-header"><h2>Invites</h2></header><div class="alert-list">
         ${invites.length ? invites.map((invite) => `<article class="alert-row"><strong>${escapeHtml(invite.email)}</strong><span>Amazon: ${escapeHtml(invite.amazon_email || invite.email)} · ${escapeHtml(invite.status)}</span></article>`).join("") : `<p class="empty">No invites yet.</p>`}
@@ -555,20 +577,26 @@ function renderAdmin(summary, accounts, invites) {
     event.preventDefault();
     const form = event.currentTarget;
     const status = document.querySelector("#inviteStatus");
-    status.textContent = "Creating invite...";
+    const email = new FormData(form).get("email");
+    setStatus(status, "Creating invite...");
     try {
       const values = new FormData(form);
       const invite = await api("/api/admin/invites", {
         method: "POST",
         body: JSON.stringify({ email: values.get("email"), amazonEmail: values.get("amazonEmail") }),
       });
-      status.textContent = `Invite ready: ${invite.inviteUrl} · Amazon beta: ${invite.amazonEmail}`;
       form.reset();
+      // Held outside the DOM: refresh() redraws this whole page, and the link
+      // used to be written straight into a status line that the redraw wiped
+      // before it could be copied.
+      lastInvite = { email, inviteUrl: invite.inviteUrl, amazonEmail: invite.amazonEmail };
       await refresh();
+      setStatus("#inviteStatus", "Invite ready. Send them the link below.", "ok");
     } catch (error) {
-      status.textContent = error.message;
+      setStatus(status, error.message, "error");
     }
   });
+  bindCopyButtons();
 }
 
 async function startSetupFlow(options = {}) {
