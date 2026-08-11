@@ -1210,8 +1210,23 @@ function myBuildsAuthorized(request: Request, env: Env): boolean {
     request.headers.get("authorization") === `Bearer ${env.MY_BUILDS_STATUS_TOKEN}`;
 }
 
+/**
+ * These are the owner's settings and the owner is signed in, so an owner
+ * session counts as much as the panel's shared token. Accepting both is what
+ * lets the same endpoints serve the admin page and My Builds.
+ */
+async function requireOwnerOrPanel(request: Request, env: Env): Promise<void> {
+  if (myBuildsAuthorized(request, env)) return;
+  const sessionAccountId = await accountIdFromSession(request, env);
+  if (sessionAccountId) {
+    const account = await accountById(env, sessionAccountId);
+    if (account?.role === "owner" && account.status === "active") return;
+  }
+  throw new HttpError(403, "Owner access is required.");
+}
+
 async function handleOwnerStatus(request: Request, env: Env): Promise<Response> {
-  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  await requireOwnerOrPanel(request, env);
   const owner = await env.DB.prepare(
     "SELECT id FROM accounts WHERE email_normalized = ? AND role = 'owner' AND status = 'active'",
   ).bind(normalizeEmail(env.OWNER_EMAIL)).first<{ id: string }>();
@@ -1221,7 +1236,7 @@ async function handleOwnerStatus(request: Request, env: Env): Promise<Response> 
 }
 
 async function ownerAccount(request: Request, env: Env): Promise<Account> {
-  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  await requireOwnerOrPanel(request, env);
   const owner = await env.DB.prepare(
     `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE email_normalized = ? AND role = 'owner'`,
   )
@@ -1296,25 +1311,39 @@ async function sendPasswordLink(
   }
   const token = await createPasswordToken(env, account.id, purpose);
   const link = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/?set-password=${encodeURIComponent(token)}`;
-  const greeting = account.display_name ? `Hi ${account.display_name},` : "Hi,";
-  const opening = purpose === "set"
-    ? "Device Finder has its own sign-in now, so it needs a password of its own."
-    : "You asked to reset your Device Finder password.";
+  const name = account.display_name ? ` ${account.display_name}` : "";
+  const body = purpose === "set"
+    ? [
+        `Hi${name},`,
+        "",
+        "Device Finder is moving to its own sign-in, so it needs a password of its own.",
+        "Your Apple devices and their Alexa names stay exactly as they are.",
+        "",
+        "Set your password:",
+        link,
+        "",
+        `That link works once and lasts ${TOKEN_VALID_HOURS} hours.`,
+        "There is no rush — your current sign-in keeps working either way.",
+        "",
+        "Basil",
+      ]
+    : [
+        `Hi${name},`,
+        "",
+        "Here is the link to set a new Device Finder password:",
+        link,
+        "",
+        `It works once and lasts ${TOKEN_VALID_HOURS} hours.`,
+        "If you did not ask for this, nothing has changed and you can ignore it.",
+        "",
+        "Basil",
+      ];
   try {
     await sendEmailViaSmtp(
       smtp,
       account.email,
-      purpose === "set" ? "Set your Device Finder password" : "Reset your Device Finder password",
-      [
-        greeting,
-        "",
-        opening,
-        "",
-        `Choose one here: ${link}`,
-        "",
-        `The link works once and expires in ${TOKEN_VALID_HOURS} hours.`,
-        "If you did not expect this, you can ignore it — nothing changes until the link is used.",
-      ].join("\n"),
+      purpose === "set" ? "Your new Device Finder sign-in" : "Reset your Device Finder password",
+      body.join("\n"),
     );
   } catch (error) {
     console.error("Password link delivery failed", error instanceof Error ? error.message : error);
@@ -1370,23 +1399,40 @@ function oauthPage(title: string, body: string): Response {
     [
       '<!doctype html><html lang="en"><head><meta charset="utf-8">',
       '<meta name="viewport" content="width=device-width, initial-scale=1">',
-      `<title>${escapeText(title)}</title>`,
+      `<title>${escapeText(title)} · Device Finder</title>`,
       '<style>',
-      ':root{color-scheme:light dark}',
-      'body{font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;',
-      'display:grid;place-items:center;min-height:100vh;background:#f3f5f7;color:#16202b}',
-      '@media(prefers-color-scheme:dark){body{background:#0e1620;color:#dde5eb}',
-      '.card{background:#16212c!important;border-color:#2a3845!important}',
-      'input{background:#0e1620!important;color:inherit!important;border-color:#2a3845!important}}',
-      '.card{background:#fff;border:1px solid #cfd7de;border-radius:10px;padding:28px;max-width:26rem;width:calc(100% - 2rem)}',
-      'h1{font-size:1.3rem;margin:0 0 .5rem;letter-spacing:-.01em}',
-      'p{margin:0 0 1rem;color:#55646f}',
-      '@media(prefers-color-scheme:dark){p{color:#8b9ba8}}',
-      'label{display:grid;gap:.3rem;margin-bottom:.85rem;font-size:.82rem;text-transform:uppercase;letter-spacing:.05em}',
-      'input{font:inherit;padding:.6rem .7rem;border:1px solid #cfd7de;border-radius:6px;text-transform:none}',
-      'button{font:600 15px inherit;padding:.7rem 1.1rem;border:0;border-radius:6px;background:#2f6f82;color:#fff;cursor:pointer;width:100%}',
-      '.err{color:#a83a28}',
+      // One screen, seen once, on a phone. It reads as part of the app rather
+      // than as a form the browser threw up, and it works in either theme
+      // because whoever opens it did not choose to be here.
+      ':root{color-scheme:light dark;--bg:#f3f5f7;--card:#fff;--ink:#16202b;--dim:#5b6b78;',
+      '--line:#d7dee4;--accent:#2f6f82;--danger:#a83a28}',
+      '@media(prefers-color-scheme:dark){:root{--bg:#0e1620;--card:#16212c;--ink:#dde5eb;',
+      '--dim:#8b9ba8;--line:#2a3845;--accent:#6fb6c9;--danger:#e08472}}',
+      '*{box-sizing:border-box}',
+      'body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;',
+      'background:var(--bg);color:var(--ink);',
+      "font:16px/1.55 ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;",
+      '-webkit-font-smoothing:antialiased}',
+      '.card{width:100%;max-width:24rem;background:var(--card);border:1px solid var(--line);',
+      'border-radius:14px;padding:30px 26px}',
+      '.brand{display:flex;align-items:center;gap:9px;margin-bottom:22px;font-size:.72rem;',
+      'letter-spacing:.13em;text-transform:uppercase;color:var(--dim)}',
+      '.brand i{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:none}',
+      'h1{font-size:1.32rem;line-height:1.25;letter-spacing:-.015em;margin:0 0 .5rem;text-wrap:balance}',
+      'p{margin:0 0 1.15rem;color:var(--dim);font-size:.94rem}',
+      'label{display:grid;gap:.32rem;margin-bottom:.9rem;font-size:.68rem;letter-spacing:.09em;',
+      'text-transform:uppercase;color:var(--dim)}',
+      'input{font:inherit;font-size:1rem;padding:.72rem .8rem;border:1px solid var(--line);',
+      'border-radius:9px;background:var(--bg);color:var(--ink);text-transform:none;width:100%}',
+      'input:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}',
+      'button{font:600 15px inherit;padding:.8rem 1.1rem;border:0;border-radius:9px;',
+      'background:var(--accent);color:#fff;cursor:pointer;width:100%;margin-top:.35rem}',
+      'button:hover{filter:brightness(1.07)}',
+      'button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}',
+      '.err{color:var(--danger);font-size:.88rem;margin:-.5rem 0 1rem}',
+      '.foot{margin:1.4rem 0 0;font-size:.78rem;color:var(--dim);text-align:center}',
       '</style></head><body><main class="card">',
+      '<div class="brand"><i></i><span>Device Finder</span></div>',
       body,
       '</main></body></html>',
     ].join(""),
@@ -1436,7 +1482,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
 
   const client = parseClient(await readSettings(env, OAUTH_KEYS));
   if (!client) {
-    return oauthPage("Not set up", "<h1>Alexa linking is not set up yet.</h1><p>Generate client credentials in the owner panel first.</p>");
+    return oauthPage("Not set up", "<h1>Not ready yet.</h1><p>Alexa linking has not been set up for this app. Nothing you can do from here.</p>");
   }
   // A bad client or redirect must never be redirected back to — the URI is not
   // trusted yet, so the error stays here.
@@ -1444,7 +1490,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     // The address Alexa actually used is not a secret, and printing it turns a
     // wrong allowlist from a guessing game into a copy and paste.
     console.error(`OAuth authorize refused: redirect_uri=${params.redirectUri} client_id=${params.clientId}`);
-    return oauthPage("Cannot continue", '<h1>That link is not valid.</h1><p class="err">The client or redirect address does not match what is registered.</p>');
+    return oauthPage("Cannot continue", '<h1>This link will not work.</h1><p>It did not come from Alexa, or it has been altered on the way. Start again from the Alexa app.</p>');
   }
   if (params.responseType !== "code") {
     return authorizeRedirect(params.redirectUri, { error: "unsupported_response_type", state: params.state });
@@ -1502,7 +1548,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
       "Sign in",
       [
         "<h1>Connect Alexa to Device Finder.</h1>",
-        "<p>Sign in and your Echo is linked — one step, nothing else to confirm.</p>",
+        "<p>Sign in and your Echo is linked. There is nothing else to confirm.</p>",
         signInError ? `<p class="err">${escapeText(signInError)}</p>` : "",
         '<form method="post" action="/oauth/authorize">',
         hiddenFields(carried),
@@ -1519,7 +1565,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     // SameSite=Lax, so reaching here means the person is really on this page.
     const origin = request.headers.get("origin");
     if (origin && origin !== new URL(env.PUBLIC_BASE_URL).origin) {
-      return oauthPage("Cannot continue", '<h1>That request did not come from here.</h1>');
+      return oauthPage("Cannot continue", '<h1>That request did not come from here.</h1><p>Start again from the Alexa app.</p>');
     }
     const code = await issueCode(env, accountId, client, params.redirectUri, params.codeChallenge);
     return authorizeRedirect(params.redirectUri, { code, state: params.state });
@@ -1529,7 +1575,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   return oauthPage(
     "Connect Alexa",
     [
-      "<h1>Connect Alexa to Device Finder?</h1>",
+      "<h1>Connect Alexa?</h1>",
       `<p>Alexa will be able to ring the Apple devices on ${escapeText(account?.email ?? "your account")}.</p>`,
       '<form method="post" action="/oauth/authorize">',
       hiddenFields({ ...carried, approve: "yes" }),
@@ -1614,7 +1660,7 @@ async function writeSettings(env: Env, entries: Record<string, string>): Promise
 }
 
 async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Response> {
-  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  await requireOwnerOrPanel(request, env);
 
   if (request.method === "GET") {
     const stored = await readSettings(env, SMTP_KEYS);
@@ -1665,7 +1711,7 @@ async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Res
 }
 
 async function handleOwnerAlexaOauth(request: Request, env: Env): Promise<Response> {
-  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  await requireOwnerOrPanel(request, env);
   const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
 
   if (request.method === "GET") {
@@ -1713,7 +1759,7 @@ async function handleOwnerAlexaOauth(request: Request, env: Env): Promise<Respon
 }
 
 async function handleOwnerEmailTest(request: Request, env: Env): Promise<Response> {
-  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  await requireOwnerOrPanel(request, env);
   const smtp = await smtpSettings(env);
   if (!smtp) throw new HttpError(409, "Save a host, port and sender address before sending a test.");
 
@@ -1726,7 +1772,7 @@ async function handleOwnerEmailTest(request: Request, env: Env): Promise<Respons
       smtp,
       to,
       "Device Finder test email",
-      "SMTP is set up correctly. Renewal alerts will reach you here when push cannot.",
+      "Mail is working. Renewal alerts will arrive here whenever a push notification cannot reach you.",
     );
   } catch (error) {
     // The mail server's own words are the whole point of a test button.
@@ -1868,8 +1914,8 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
         crypto.randomUUID(),
         accountId,
         deviceId,
-        "Apple login recovered",
-        "Find My access is healthy again.",
+        "Working again",
+        "Find My is reaching this device again. Nothing to do.",
         deviceId,
         accountId,
       ),
@@ -1911,8 +1957,8 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
         crypto.randomUUID(),
         accountId,
         deviceId,
-        "Renew Apple login",
-        "Apple Find My needs a fresh login before Alexa can ring this device.",
+        "Alexa cannot ring this device",
+        "Apple has stopped accepting the saved login for this device. Open Device Finder and sign in to Apple again — Alexa cannot ring it until you do.",
         accountId,
         deviceId,
       ),
@@ -1941,8 +1987,8 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
         crypto.randomUUID(),
         accountId,
         deviceId,
-        "Device Finder needs attention",
-        "Find My could not reach this Apple device. Open Device Finder to check its setup.",
+        "A device stopped responding",
+        "Find My could not reach this device. Open Device Finder to see what it reported.",
         accountId,
         deviceId,
       ),

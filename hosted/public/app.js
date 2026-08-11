@@ -366,6 +366,155 @@ function describeAccountDevices(account) {
   return ready ? `${ready} of ${total} ${noun} ready · ${state}` : `${total} ${noun} · ${state}`;
 }
 
+// Owner settings that used to live in the My Builds panel. They belong on the
+// page you already come to in order to run the build, and the endpoints accept
+// the owner's own session, so nothing needs a shared token.
+const SETTINGS_MARKUP = `
+  <section class="panel" id="mailSection">
+    <header class="section-header"><h2>Mail server</h2></header>
+    <p class="lede subtle">Used for sign-in links and renewal alerts when push cannot reach someone. Port 587 upgrades with STARTTLS; 465 is encrypted from the first byte.</p>
+    <div id="mailSettings"><p class="empty">Loading…</p></div>
+    <p id="mailStatus" class="form-status" aria-live="polite"></p>
+  </section>
+  <section class="panel" id="linkingSection">
+    <header class="section-header"><h2>Alexa account linking</h2></header>
+    <p class="lede subtle">Device Finder issues Alexa's tokens itself. These are the values its skill needs in the Alexa developer console.</p>
+    <div id="linkingSettings"><p class="empty">Loading…</p></div>
+    <p id="linkingStatus" class="form-status" aria-live="polite"></p>
+  </section>`;
+
+const settingsStatus = (id, message) => {
+  const node = document.querySelector(id);
+  if (node) node.textContent = message;
+};
+
+const settingsField = (label, name, value, type = "text", placeholder = "") =>
+  `<label>${escapeHtml(label)}<input name="${escapeHtml(name)}" type="${type}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off"></label>`;
+
+async function renderMailSettings() {
+  const host = document.querySelector("#mailSettings");
+  if (!host) return;
+  let settings;
+  try {
+    settings = await api("/api/owner/email");
+  } catch (error) {
+    host.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    return;
+  }
+  host.innerHTML = `
+    <form id="mailForm" class="setup-form">
+      ${settingsField("Host", "host", settings.host, "text", "mail.example.com")}
+      ${settingsField("Port", "port", String(settings.port || "587"), "text", "587")}
+      ${settingsField("Username", "username", settings.username, "text", "you@example.com")}
+      <label>Password<input name="password" type="password" autocomplete="new-password" placeholder="${settings.passwordSet ? "Saved — leave blank to keep" : "Mailbox password"}"></label>
+      ${settingsField("Send from", "from", settings.from, "email", "noreply@example.com")}
+      ${settingsField("Sender name", "fromName", settings.fromName, "text", "Device Finder")}
+      <div class="actions">
+        <button class="primary" type="submit">Save</button>
+        <button id="mailTest" class="secondary" type="button">Send test</button>
+      </div>
+    </form>`;
+
+  document.querySelector("#mailForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    const port = Number(values.get("port"));
+    settingsStatus("#mailStatus", "Saving…");
+    try {
+      await api("/api/owner/email", {
+        method: "PUT",
+        body: JSON.stringify({
+          host: values.get("host"),
+          port,
+          username: values.get("username"),
+          from: values.get("from"),
+          fromName: values.get("fromName"),
+          // 465 is implicit TLS; everything else upgrades with STARTTLS.
+          // Deriving it removes the one setting people get backwards.
+          secure: port === 465,
+          ...(values.get("password") ? { password: values.get("password") } : {}),
+        }),
+      });
+      settingsStatus("#mailStatus", "Saved. Send a test to confirm the server accepts it.");
+    } catch (error) {
+      settingsStatus("#mailStatus", error.message);
+    }
+  });
+
+  document.querySelector("#mailTest").addEventListener("click", async () => {
+    settingsStatus("#mailStatus", "Sending…");
+    try {
+      const sent = await api("/api/owner/email/test", { method: "POST", body: "{}" });
+      settingsStatus("#mailStatus", `Sent to ${sent.to}. Check spam too on a new sending address.`);
+    } catch (error) {
+      settingsStatus("#mailStatus", error.message);
+    }
+  });
+}
+
+async function renderLinkingSettings() {
+  const host = document.querySelector("#linkingSettings");
+  if (!host) return;
+  let config;
+  try {
+    config = await api("/api/owner/alexa-oauth");
+  } catch (error) {
+    host.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    return;
+  }
+
+  const draw = (secret) => {
+    host.innerHTML = `
+      <dl class="value-list">
+        <div><dt>Authorization URI</dt><dd><code>${escapeHtml(config.authorizationUrl)}</code></dd></div>
+        <div><dt>Access Token URI</dt><dd><code>${escapeHtml(config.accessTokenUrl)}</code></dd></div>
+        <div><dt>Client ID</dt><dd><code>${escapeHtml(config.clientId || "not generated yet")}</code></dd></div>
+        <div><dt>Client Secret</dt><dd>${secret ? `<code>${escapeHtml(secret)}</code>` : config.secretSet ? "stored — generate again to replace" : "not generated yet"}</dd></div>
+      </dl>
+      <form id="linkingForm" class="setup-form">
+        <label class="wide">Redirect addresses — one per line, exactly as Alexa lists them
+          <textarea name="redirectUris" rows="3">${escapeHtml(config.redirectUris.join("\n"))}</textarea>
+        </label>
+        <div class="actions">
+          <button class="primary" type="submit">Save addresses</button>
+          <button id="linkingGenerate" class="secondary" type="button">${config.secretSet ? "Generate new credentials" : "Generate credentials"}</button>
+        </div>
+      </form>`;
+    bind();
+  };
+
+  const bind = () => {
+    document.querySelector("#linkingForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const raw = String(new FormData(event.currentTarget).get("redirectUris") || "");
+      const redirectUris = raw.split("\n").map((value) => value.trim()).filter(Boolean);
+      settingsStatus("#linkingStatus", "Saving…");
+      try {
+        await api("/api/owner/alexa-oauth", { method: "PUT", body: JSON.stringify({ redirectUris }) });
+        config = { ...config, redirectUris };
+        settingsStatus("#linkingStatus", `Saved ${redirectUris.length} address${redirectUris.length === 1 ? "" : "es"}.`);
+      } catch (error) {
+        settingsStatus("#linkingStatus", error.message);
+      }
+    });
+
+    document.querySelector("#linkingGenerate").addEventListener("click", async () => {
+      if (config.secretSet && !confirm("This replaces the current credentials and unlinks every Echo until the new ones are in the Alexa console. Continue?")) return;
+      settingsStatus("#linkingStatus", "Generating…");
+      try {
+        const created = await api("/api/owner/alexa-oauth", { method: "POST" });
+        config = { ...config, clientId: created.clientId, secretSet: true };
+        draw(created.clientSecret);
+        settingsStatus("#linkingStatus", "Copy the secret now — it is stored hashed and cannot be shown again.");
+      } catch (error) {
+        settingsStatus("#linkingStatus", error.message);
+      }
+    });
+  };
+
+  draw();
+}
+
 function renderAdmin(summary, accounts, invites) {
   app.innerHTML = `
     <header class="topbar">
@@ -398,6 +547,7 @@ function renderAdmin(summary, accounts, invites) {
       <section class="panel"><header class="section-header"><h2>Accounts</h2></header><div class="alert-list">
         ${accounts.length ? accounts.map((account) => `<article class="alert-row"><strong>${escapeHtml(account.display_name || account.email)}</strong><span>${escapeHtml(account.email)} · ${escapeHtml(describeAccountDevices(account))} · Alexa ${escapeHtml(String(account.alexa_status).replaceAll("_", " "))}</span></article>`).join("") : `<p class="empty">No accounts yet.</p>`}
       </div></section>
+      ${SETTINGS_MARKUP}
     </section>
   `;
   document.querySelector("#signOut")?.addEventListener("click", () => void signOut());
@@ -871,6 +1021,8 @@ async function refresh() {
         api("/api/admin/invites"),
       ]);
       renderAdmin(summary, accountPayload.accounts ?? [], invitePayload.invites ?? []);
+      void renderMailSettings();
+      void renderLinkingSettings();
       return;
     }
     const status = await api("/api/status");
