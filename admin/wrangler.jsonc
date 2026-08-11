@@ -13,7 +13,7 @@
   // out of sync with what is actually deployed.
   "vars": {
     "ACCESS_TEAM_DOMAIN": "https://birniger.cloudflareaccess.com",
-    "POLICY_AUD": "REPLACE_WITH_THE_ADMIN_APPLICATION_AUD",
+    "POLICY_AUD": "f739939a7ac4df19a7ac5b5a09389a7b0e4cd15edd48faaa9f8de587838ed1b1",
     "OWNER_EMAIL": "basil.irniger@gmail.com"
   },
   "services": [
