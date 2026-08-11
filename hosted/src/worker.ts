@@ -1123,6 +1123,22 @@ async function enqueueDailyHealthChecks(env: Env): Promise<void> {
   }
 }
 
+/** Clears out what has expired. Nothing here is load-bearing; it just stops
+ *  sessions, links and codes accumulating in D1 forever. */
+async function sweepExpired(env: Env): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM account_sessions WHERE datetime(expires_at) < CURRENT_TIMESTAMP"),
+    env.DB.prepare("DELETE FROM password_tokens WHERE datetime(expires_at) < CURRENT_TIMESTAMP"),
+    env.DB.prepare("DELETE FROM oauth_codes WHERE datetime(expires_at) < CURRENT_TIMESTAMP"),
+    // Revoked refresh tokens are how a replay is recognised as a replay rather
+    // than as an unknown token, so they outlive their expiry by a wide margin
+    // instead of being swept with everything else.
+    env.DB.prepare(
+      "DELETE FROM oauth_tokens WHERE datetime(expires_at) < datetime('now', '-30 days')",
+    ),
+  ]);
+}
+
 async function handleAdminSummary(env: Env): Promise<Response> {
   const [accounts, readyDevices, renewalDevices, queuedAlerts, failedJobs] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS count FROM accounts WHERE status = 'active'").first<{ count: number }>(),
@@ -2055,5 +2071,6 @@ export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(enqueueDailyHealthChecks(env));
     ctx.waitUntil(deliverQueuedNotifications(env));
+    ctx.waitUntil(sweepExpired(env));
   },
 } satisfies ExportedHandler<Env>;
