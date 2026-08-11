@@ -10,7 +10,7 @@ import unittest
 import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +95,38 @@ class FindMyTests(unittest.TestCase):
         _, kwargs = fake_pyicloud.PyiCloudService.call_args
         self.assertFalse(kwargs["authenticate"])
         self.assertIsNone(kwargs["password"])
+        api.authenticate.assert_not_called()
+
+    def test_stored_password_recovers_an_expired_session(self):
+        """Apple skips the verification code because pyicloud sends the trust
+        token it issued at setup, so opted-in accounts recover unattended."""
+        api = Mock()
+        api.get_auth_status.return_value = {"authenticated": False}
+        api.requires_2fa = False
+        api.devices = []
+        fake_pyicloud = Mock()
+        fake_pyicloud.PyiCloudService.return_value = api
+
+        with patch.dict(sys.modules, {"pyicloud": fake_pyicloud}):
+            self.find_my._open_api(
+                "basil@example.com", Path("/tmp/session"), "stored-secret"
+            )
+        _, kwargs = fake_pyicloud.PyiCloudService.call_args
+        self.assertEqual(kwargs["password"], "stored-secret")
+        api.authenticate.assert_called_once()
+
+    def test_expired_trust_token_still_asks_a_person(self):
+        api = Mock()
+        api.get_auth_status.return_value = {"authenticated": False}
+        api.requires_2fa = True
+        fake_pyicloud = Mock()
+        fake_pyicloud.PyiCloudService.return_value = api
+
+        with patch.dict(sys.modules, {"pyicloud": fake_pyicloud}):
+            with self.assertRaises(self.find_my.ReauthenticationRequired):
+                self.find_my._open_api(
+                    "basil@example.com", Path("/tmp/session"), "stored-secret"
+                )
 
     def test_monitor_stays_active_for_sound_then_stops_before_return(self):
         class Manager:
@@ -195,6 +227,47 @@ class FindMyTests(unittest.TestCase):
                         Path(directory),
                     )
         device.play_sound.assert_called_once()
+
+    def test_find_my_rejecting_the_session_is_reported_as_reauthentication(self):
+        """The real cause of the 2026-08 outage.
+
+        Find My rejects a restored session that still passes get_auth_status,
+        so pyicloud retries the login and finds no stored password. Untranslated
+        this became the catch-all category, which the hosted app discarded, so
+        nobody was ever told to renew.
+        """
+
+        class PyiCloudFailedLoginException(Exception):
+            pass
+
+        api = Mock()
+        type(api).devices = PropertyMock(side_effect=PyiCloudFailedLoginException("No password set"))
+
+        with self.assertRaises(self.find_my.ReauthenticationRequired):
+            self.find_my._open_device_manager(api)
+
+    def test_pyicloud_no_devices_is_reported_as_device_not_found(self):
+        """pyicloud fails before this module can compare names, so translate it.
+
+        Untranslated it reaches the worker as the catch-all category, which is
+        what hid a total Find My outage from the dashboard.
+        """
+
+        class PyiCloudNoDevicesException(Exception):
+            pass
+
+        api = Mock()
+        type(api).devices = PropertyMock(side_effect=PyiCloudNoDevicesException())
+
+        with self.assertRaises(self.find_my.DeviceNotFound):
+            self.find_my._open_device_manager(api)
+
+    def test_other_device_manager_errors_are_not_swallowed(self):
+        api = Mock()
+        type(api).devices = PropertyMock(side_effect=ValueError("boom"))
+
+        with self.assertRaises(ValueError):
+            self.find_my._open_device_manager(api)
 
 
 class SessionStoreTests(unittest.TestCase):
@@ -395,6 +468,7 @@ class WorkerHandlerTests(unittest.TestCase):
     def test_cleanup_runs_when_ring_fails(self):
         find_my_module = types.ModuleType("find_my")
         find_my_module.ring_device = Mock(side_effect=RuntimeError("ring failed"))
+        find_my_module.check_device = Mock()
         find_my_module.DeviceNotFound = type("DeviceNotFound", (RuntimeError,), {})
         find_my_module.ReauthenticationRequired = type(
             "ReauthenticationRequired", (RuntimeError,), {}
@@ -439,6 +513,7 @@ class WorkerHandlerTests(unittest.TestCase):
         secret = "basil@example.com: full private response body"
         find_my_module = types.ModuleType("find_my")
         find_my_module.ring_device = Mock(side_effect=RuntimeError(secret))
+        find_my_module.check_device = Mock()
         find_my_module.DeviceNotFound = type("DeviceNotFound", (RuntimeError,), {})
         find_my_module.ReauthenticationRequired = type(
             "ReauthenticationRequired", (RuntimeError,), {}
@@ -491,6 +566,124 @@ class WorkerHandlerTests(unittest.TestCase):
                 reserve_ms=7_000,
             ):
                 self.fail("deadline should reject before entering the operation")
+
+    def test_message_can_select_account_scoped_session_prefix(self):
+        find_my_module = types.ModuleType("find_my")
+        find_my_module.ring_device = Mock()
+        find_my_module.check_device = Mock()
+        find_my_module.DeviceNotFound = type("DeviceNotFound", (RuntimeError,), {})
+        find_my_module.ReauthenticationRequired = type(
+            "ReauthenticationRequired", (RuntimeError,), {}
+        )
+
+        store = Mock()
+        store.download.return_value = Path("/tmp/find-my-alexa-session-job-1")
+        session_store_module = types.ModuleType("session_store")
+        session_store_module.S3SessionStore = Mock(return_value=store)
+        session_store_module.SessionStoreError = type(
+            "SessionStoreError", (RuntimeError,), {}
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "find_my": find_my_module,
+                "session_store": session_store_module,
+            },
+        ):
+            worker_app = load_module(
+                "worker_app_multi_user_test_module",
+                ROOT / "backend/worker/app.py",
+            )
+
+        event = {
+            "Records": [
+                {
+                    "body": json.dumps(
+                        {
+                            "action": "ring",
+                            "jobId": "job/1",
+                            "appleId": "friend@example.com",
+                            "deviceName": "Friend's iPhone",
+                            "sessionPrefix": "accounts/account-1/devices/device-1/",
+                            "sessionBucket": "friend-bucket",
+                        }
+                    )
+                }
+            ]
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            response = worker_app.lambda_handler(event, None)
+
+        self.assertEqual(response, {"processed": 1})
+        session_store_module.S3SessionStore.assert_called_once_with(
+            bucket="friend-bucket",
+            prefix="accounts/account-1/devices/device-1/",
+            local_directory=Path("/tmp/find-my-alexa-session-job-1"),
+        )
+        find_my_module.ring_device.assert_called_once_with(
+            apple_id="friend@example.com",
+            target_name="Friend's iPhone",
+            session_directory=Path("/tmp/find-my-alexa-session-job-1"),
+            password=None,
+        )
+
+    def test_health_check_uses_no_ring_validation(self):
+        find_my_module = types.ModuleType("find_my")
+        find_my_module.ring_device = Mock()
+        find_my_module.check_device = Mock()
+        find_my_module.DeviceNotFound = type("DeviceNotFound", (RuntimeError,), {})
+        find_my_module.ReauthenticationRequired = type(
+            "ReauthenticationRequired", (RuntimeError,), {}
+        )
+
+        store = Mock()
+        store.download.return_value = Path("/tmp/find-my-alexa-session-health-1")
+        session_store_module = types.ModuleType("session_store")
+        session_store_module.S3SessionStore = Mock(return_value=store)
+        session_store_module.SessionStoreError = type(
+            "SessionStoreError", (RuntimeError,), {}
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                "find_my": find_my_module,
+                "session_store": session_store_module,
+            },
+        ):
+            worker_app = load_module(
+                "worker_app_health_check_test_module",
+                ROOT / "backend/worker/app.py",
+            )
+
+        event = {
+            "Records": [
+                {
+                    "body": json.dumps(
+                        {
+                            "action": "health_check",
+                            "jobId": "health-1",
+                            "appleId": "friend@example.com",
+                            "deviceName": "Friend's iPhone",
+                            "sessionPrefix": "accounts/account-1/devices/device-1/",
+                            "sessionBucket": "friend-bucket",
+                        }
+                    )
+                }
+            ]
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            response = worker_app.lambda_handler(event, None)
+
+        self.assertEqual(response, {"processed": 1})
+        find_my_module.check_device.assert_called_once_with(
+            apple_id="friend@example.com",
+            target_name="Friend's iPhone",
+            session_directory=Path("/tmp/find-my-alexa-session-health-1"),
+            password=None,
+        )
+        find_my_module.ring_device.assert_not_called()
 
 
 if __name__ == "__main__":
