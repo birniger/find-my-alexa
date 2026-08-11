@@ -2082,6 +2082,10 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       publicBaseUrl: env.PUBLIC_BASE_URL,
       vapidPublicKey: env.VAPID_PUBLIC_KEY || "",
       emailFallbackAvailable: Boolean(await smtpSettings(env)),
+      // Whether the admin host is proxying this. The page needs to know:
+      // Cloudflare Access owns identity there, so a sign-out button has nothing
+      // to end, and a relative link to "/" lands back on /admin.
+      adminHost: adminHostAuthorized(request, env),
     });
   }
   if (request.method === "GET" && path === "/api/owner/status") return handleOwnerStatus(request, env);

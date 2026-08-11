@@ -532,7 +532,11 @@ function renderAdmin(summary, accounts, invites) {
   app.innerHTML = `
     <header class="topbar">
       <a class="brand" href="/"><span class="mark"></span><span>Device Finder</span></a>
-      <nav><a class="secondary link-button" href="/">Tester app</a><button id="signOut" class="secondary" type="button">Sign out</button></nav>
+      <nav><a class="secondary link-button" href="${escapeHtml(config.adminHost ? config.publicBaseUrl : "/")}">Tester app</a>${
+        // On the admin host Cloudflare Access owns identity: there is no session
+        // here to end, so the button is dropped rather than left doing nothing.
+        config.adminHost ? "" : '<button id="signOut" class="secondary" type="button">Sign out</button>'
+      }</nav>
     </header>
     <section class="workspace">
       <div class="panel main-panel">
