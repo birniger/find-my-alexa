@@ -1422,6 +1422,9 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   // A bad client or redirect must never be redirected back to — the URI is not
   // trusted yet, so the error stays here.
   if (!safeEquals(params.clientId, client.clientId) || !redirectAllowed(client, params.redirectUri)) {
+    // The address Alexa actually used is not a secret, and printing it turns a
+    // wrong allowlist from a guessing game into a copy and paste.
+    console.error(`OAuth authorize refused: redirect_uri=${params.redirectUri} client_id=${params.clientId}`);
     return oauthPage("Cannot continue", '<h1>That link is not valid.</h1><p class="err">The client or redirect address does not match what is registered.</p>');
   }
   if (params.responseType !== "code") {
@@ -1461,23 +1464,15 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
       const matched = await verifyPassword(env, password, row?.password_hash ?? ABSENT_ACCOUNT_HASH);
       if (row && matched) {
         const value = await createSession(env, row.id, request.headers.get("user-agent") ?? "");
-        // Signed in, but not linked yet: the person still has to press Connect,
-        // so signing in can never by itself hand an account to an Echo.
-        return new Response(
-          [
-            '<!doctype html><meta charset="utf-8"><form id="f" method="post" action="/oauth/authorize">',
-            hiddenFields(carried),
-            '</form><script>document.getElementById("f").submit()</script>',
-          ].join(""),
-          {
-            status: 200,
-            headers: {
-              "content-type": "text/html; charset=utf-8",
-              "cache-control": "no-store",
-              "set-cookie": sessionCookie(value, SESSION_MAX_AGE),
-            },
-          },
-        );
+        // Typing your own password into this form is itself the deliberate act
+        // that a separate Connect press exists to capture, so asking for both
+        // would be ceremony. An attacker cannot reach here: they would need the
+        // password, and having it they would not need this route.
+        const code = await issueCode(env, row.id, client, params.redirectUri, params.codeChallenge);
+        const redirect = authorizeRedirect(params.redirectUri, { code, state: params.state });
+        const headers = new Headers(redirect.headers);
+        headers.append("set-cookie", sessionCookie(value, SESSION_MAX_AGE));
+        return new Response(null, { status: 302, headers });
       }
       signInError = "That email and password do not match.";
     }
@@ -1487,14 +1482,14 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     return oauthPage(
       "Sign in",
       [
-        "<h1>Sign in to connect Alexa.</h1>",
-        "<p>Use your Device Finder email and password.</p>",
+        "<h1>Connect Alexa to Device Finder.</h1>",
+        "<p>Sign in and your Echo is linked — one step, nothing else to confirm.</p>",
         signInError ? `<p class="err">${escapeText(signInError)}</p>` : "",
         '<form method="post" action="/oauth/authorize">',
         hiddenFields(carried),
         '<label>Email<input name="email" type="email" autocomplete="username" required></label>',
         '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>',
-        '<button type="submit">Sign in</button>',
+        '<button type="submit">Sign in and connect</button>',
         "</form>",
       ].join(""),
     );
