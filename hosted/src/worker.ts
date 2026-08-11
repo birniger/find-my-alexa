@@ -2,6 +2,20 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import webpush from "web-push";
 import { WorkerMailer } from "worker-mailer";
 import {
+  OAUTH_KEYS,
+  accountIdFromAccessToken,
+  clientCredentials,
+  issueCode,
+  issueTokens,
+  parseClient,
+  randomToken,
+  redeemCode,
+  redirectAllowed,
+  revokeAccountTokens,
+  rotateRefreshToken,
+  safeEquals,
+} from "./oauth";
+import {
   SESSION_MAX_AGE,
   TOKEN_VALID_HOURS,
   accountIdFromSession,
@@ -208,6 +222,21 @@ async function requireAccount(request: Request, env: Env): Promise<Account> {
       return account;
     }
   }
+
+  // An access token this app issued to the Alexa skill. Checked before Auth0
+  // because both arrive as a bearer token and only one of them is a JWT.
+  const bearer = request.headers.get("authorization");
+  if (bearer?.startsWith("Bearer ")) {
+    const tokenAccountId = await accountIdFromAccessToken(env, bearer.slice(7));
+    if (tokenAccountId) {
+      const account = await accountById(env, tokenAccountId);
+      if (account) {
+        if (account.status !== "active") throw new HttpError(403, "This account is suspended.");
+        return account;
+      }
+    }
+  }
+
   return ensureAccount(await verifyIdentity(request, env), env);
 }
 
@@ -1317,6 +1346,247 @@ async function handlePasswordSet(request: Request, env: Env): Promise<Response> 
   return signedInResponse(value, { status: "password_set" });
 }
 
+function oauthPage(title: string, body: string): Response {
+  return new Response(
+    [
+      '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+      `<title>${escapeText(title)}</title>`,
+      '<style>',
+      ':root{color-scheme:light dark}',
+      'body{font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;',
+      'display:grid;place-items:center;min-height:100vh;background:#f3f5f7;color:#16202b}',
+      '@media(prefers-color-scheme:dark){body{background:#0e1620;color:#dde5eb}',
+      '.card{background:#16212c!important;border-color:#2a3845!important}',
+      'input{background:#0e1620!important;color:inherit!important;border-color:#2a3845!important}}',
+      '.card{background:#fff;border:1px solid #cfd7de;border-radius:10px;padding:28px;max-width:26rem;width:calc(100% - 2rem)}',
+      'h1{font-size:1.3rem;margin:0 0 .5rem;letter-spacing:-.01em}',
+      'p{margin:0 0 1rem;color:#55646f}',
+      '@media(prefers-color-scheme:dark){p{color:#8b9ba8}}',
+      'label{display:grid;gap:.3rem;margin-bottom:.85rem;font-size:.82rem;text-transform:uppercase;letter-spacing:.05em}',
+      'input{font:inherit;padding:.6rem .7rem;border:1px solid #cfd7de;border-radius:6px;text-transform:none}',
+      'button{font:600 15px inherit;padding:.7rem 1.1rem;border:0;border-radius:6px;background:#2f6f82;color:#fff;cursor:pointer;width:100%}',
+      '.err{color:#a83a28}',
+      '</style></head><body><main class="card">',
+      body,
+      '</main></body></html>',
+    ].join(""),
+    { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } },
+  );
+}
+
+const escapeText = (value: string): string =>
+  value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+
+function hiddenFields(params: Record<string, string>): string {
+  return Object.entries(params)
+    .map(([key, value]) => `<input type="hidden" name="${escapeText(key)}" value="${escapeText(value)}">`)
+    .join("");
+}
+
+type AuthorizeParams = {
+  clientId: string;
+  redirectUri: string;
+  state: string;
+  codeChallenge: string;
+  responseType: string;
+  challengeMethod: string;
+};
+
+function readAuthorizeParams(source: URLSearchParams): AuthorizeParams {
+  return {
+    clientId: source.get("client_id") ?? "",
+    redirectUri: source.get("redirect_uri") ?? "",
+    state: source.get("state") ?? "",
+    codeChallenge: source.get("code_challenge") ?? "",
+    responseType: source.get("response_type") ?? "",
+    challengeMethod: source.get("code_challenge_method") ?? "",
+  };
+}
+
+function authorizeRedirect(redirectUri: string, params: Record<string, string>): Response {
+  const target = new URL(redirectUri);
+  for (const [key, value] of Object.entries(params)) if (value) target.searchParams.set(key, value);
+  return new Response(null, { status: 302, headers: { location: target.toString(), "cache-control": "no-store" } });
+}
+
+async function handleAuthorize(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const form = request.method === "POST" ? new URLSearchParams(await request.text()) : url.searchParams;
+  const params = readAuthorizeParams(form);
+
+  const client = parseClient(await readSettings(env, OAUTH_KEYS));
+  if (!client) {
+    return oauthPage("Not set up", "<h1>Alexa linking is not set up yet.</h1><p>Generate client credentials in the owner panel first.</p>");
+  }
+  // A bad client or redirect must never be redirected back to — the URI is not
+  // trusted yet, so the error stays here.
+  if (!safeEquals(params.clientId, client.clientId) || !redirectAllowed(client, params.redirectUri)) {
+    return oauthPage("Cannot continue", '<h1>That link is not valid.</h1><p class="err">The client or redirect address does not match what is registered.</p>');
+  }
+  if (params.responseType !== "code") {
+    return authorizeRedirect(params.redirectUri, { error: "unsupported_response_type", state: params.state });
+  }
+  // PKCE is required rather than optional: without it an intercepted code is
+  // enough on its own.
+  if (params.challengeMethod !== "S256" || !params.codeChallenge) {
+    return authorizeRedirect(params.redirectUri, { error: "invalid_request", state: params.state });
+  }
+
+  const carried = {
+    client_id: params.clientId,
+    redirect_uri: params.redirectUri,
+    state: params.state,
+    code_challenge: params.codeChallenge,
+    code_challenge_method: params.challengeMethod,
+    response_type: params.responseType,
+  };
+
+  let accountId = await accountIdFromSession(request, env);
+  let signInError = "";
+
+  if (request.method === "POST" && !accountId) {
+    const email = normalizeEmail(form.get("email") ?? "");
+    const password = form.get("password") ?? "";
+    if (email && password) {
+      const row = await env.DB.prepare(
+        [
+          "SELECT a.id, c.password_hash FROM accounts a",
+          "JOIN account_credentials c ON c.account_id = a.id",
+          "WHERE a.email_normalized = ? AND a.status = 'active'",
+        ].join(" "),
+      )
+        .bind(email)
+        .first<{ id: string; password_hash: string }>();
+      const matched = await verifyPassword(env, password, row?.password_hash ?? ABSENT_ACCOUNT_HASH);
+      if (row && matched) {
+        const value = await createSession(env, row.id, request.headers.get("user-agent") ?? "");
+        // Signed in, but not linked yet: the person still has to press Connect,
+        // so signing in can never by itself hand an account to an Echo.
+        return new Response(
+          [
+            '<!doctype html><meta charset="utf-8"><form id="f" method="post" action="/oauth/authorize">',
+            hiddenFields(carried),
+            '</form><script>document.getElementById("f").submit()</script>',
+          ].join(""),
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "cache-control": "no-store",
+              "set-cookie": sessionCookie(value, SESSION_MAX_AGE),
+            },
+          },
+        );
+      }
+      signInError = "That email and password do not match.";
+    }
+  }
+
+  if (!accountId) {
+    return oauthPage(
+      "Sign in",
+      [
+        "<h1>Sign in to connect Alexa.</h1>",
+        "<p>Use your Device Finder email and password.</p>",
+        signInError ? `<p class="err">${escapeText(signInError)}</p>` : "",
+        '<form method="post" action="/oauth/authorize">',
+        hiddenFields(carried),
+        '<label>Email<input name="email" type="email" autocomplete="username" required></label>',
+        '<label>Password<input name="password" type="password" autocomplete="current-password" required></label>',
+        '<button type="submit">Sign in</button>',
+        "</form>",
+      ].join(""),
+    );
+  }
+
+  if (request.method === "POST" && form.get("approve") === "yes") {
+    // A cross-site POST never arrives with the session cookie, because it is
+    // SameSite=Lax, so reaching here means the person is really on this page.
+    const origin = request.headers.get("origin");
+    if (origin && origin !== new URL(env.PUBLIC_BASE_URL).origin) {
+      return oauthPage("Cannot continue", '<h1>That request did not come from here.</h1>');
+    }
+    const code = await issueCode(env, accountId, client, params.redirectUri, params.codeChallenge);
+    return authorizeRedirect(params.redirectUri, { code, state: params.state });
+  }
+
+  const account = await accountById(env, accountId);
+  return oauthPage(
+    "Connect Alexa",
+    [
+      "<h1>Connect Alexa to Device Finder?</h1>",
+      `<p>Alexa will be able to ring the Apple devices on ${escapeText(account?.email ?? "your account")}.</p>`,
+      '<form method="post" action="/oauth/authorize">',
+      hiddenFields({ ...carried, approve: "yes" }),
+      '<button type="submit">Connect</button>',
+      "</form>",
+    ].join(""),
+  );
+}
+
+async function handleToken(request: Request, env: Env): Promise<Response> {
+  const form = new URLSearchParams(await request.text());
+  const client = parseClient(await readSettings(env, OAUTH_KEYS));
+  const supplied = clientCredentials(request, form);
+
+  const tokenError = (error: string, status = 400): Response =>
+    new Response(JSON.stringify({ error }), { status, headers: jsonHeaders });
+
+  if (!client || !safeEquals(supplied.clientId, client.clientId)) return tokenError("invalid_client", 401);
+  if (!safeEquals(await sha256Hex(supplied.clientSecret), client.secretHash)) {
+    return tokenError("invalid_client", 401);
+  }
+
+  const grantType = form.get("grant_type") ?? "";
+
+  if (grantType === "authorization_code") {
+    const accountId = await redeemCode(
+      env,
+      form.get("code") ?? "",
+      client,
+      form.get("redirect_uri") ?? "",
+      form.get("code_verifier") ?? "",
+    );
+    if (!accountId) return tokenError("invalid_grant");
+    const issued = await issueTokens(env, accountId, client.clientId);
+    // A link only counts once Alexa has really completed it.
+    await env.DB.prepare(
+      [
+        "UPDATE alexa_links SET status = 'linked', linked_at = COALESCE(linked_at, CURRENT_TIMESTAMP),",
+        "updated_at = CURRENT_TIMESTAMP WHERE account_id = ?",
+      ].join(" "),
+    )
+      .bind(accountId)
+      .run();
+    return new Response(
+      JSON.stringify({
+        access_token: issued.accessToken,
+        refresh_token: issued.refreshToken,
+        token_type: "Bearer",
+        expires_in: issued.expiresIn,
+      }),
+      { status: 200, headers: jsonHeaders },
+    );
+  }
+
+  if (grantType === "refresh_token") {
+    const issued = await rotateRefreshToken(env, form.get("refresh_token") ?? "", client.clientId);
+    if (!issued) return tokenError("invalid_grant");
+    return new Response(
+      JSON.stringify({
+        access_token: issued.accessToken,
+        refresh_token: issued.refreshToken,
+        token_type: "Bearer",
+        expires_in: issued.expiresIn,
+      }),
+      { status: 200, headers: jsonHeaders },
+    );
+  }
+
+  return tokenError("unsupported_grant_type");
+}
+
 async function writeSettings(env: Env, entries: Record<string, string>): Promise<void> {
   const statements = Object.entries(entries).map(([key, value]) =>
     env.DB.prepare(
@@ -1378,6 +1648,54 @@ async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Res
 
   await writeSettings(env, entries);
   return json({ status: "saved", passwordSet: Boolean(password) || Boolean((await readSettings(env, ["smtp_password"])).smtp_password) });
+}
+
+async function handleOwnerAlexaOauth(request: Request, env: Env): Promise<Response> {
+  if (!myBuildsAuthorized(request, env)) throw new HttpError(403, "Status token is invalid.");
+  const base = env.PUBLIC_BASE_URL.replace(/\/$/, "");
+
+  if (request.method === "GET") {
+    const client = parseClient(await readSettings(env, OAUTH_KEYS));
+    return json({
+      clientId: client?.clientId ?? "",
+      // Reports only that a secret exists. It is shown once, when generated.
+      secretSet: Boolean(client?.secretHash),
+      redirectUris: client?.redirectUris ?? [],
+      authorizationUrl: `${base}/oauth/authorize`,
+      accessTokenUrl: `${base}/oauth/token`,
+    });
+  }
+
+  if (request.method === "POST") {
+    // Regenerating invalidates every existing Alexa link, because the tokens
+    // were issued to the old client. Say so rather than letting it surprise.
+    const clientId = `device-finder-${randomToken(8)}`;
+    const secret = randomToken(32);
+    await writeSettings(env, {
+      oauth_client_id: clientId,
+      oauth_client_secret_hash: await sha256Hex(secret),
+    });
+    return json({
+      clientId,
+      // The only time this is ever returned. It is stored hashed.
+      clientSecret: secret,
+      authorizationUrl: `${base}/oauth/authorize`,
+      accessTokenUrl: `${base}/oauth/token`,
+    });
+  }
+
+  const payload = await readJson(request);
+  const raw = Array.isArray(payload.redirectUris) ? payload.redirectUris : [];
+  const redirectUris = raw
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .slice(0, 10);
+  if (redirectUris.some((value) => !value.startsWith("https://"))) {
+    throw new HttpError(400, "Every redirect address must be https.");
+  }
+  await writeSettings(env, { oauth_redirect_uris: JSON.stringify(redirectUris) });
+  return json({ redirectUris });
 }
 
 async function handleOwnerEmailTest(request: Request, env: Env): Promise<Response> {
@@ -1623,6 +1941,11 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
 async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/oauth/authorize" && (request.method === "GET" || request.method === "POST")) {
+    return handleAuthorize(request, env);
+  }
+  if (path === "/oauth/token" && request.method === "POST") return handleToken(request, env);
+
   if (request.method === "GET" && path === "/api/config") {
     return json({
       appName: env.APP_NAME,
@@ -1647,6 +1970,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   }
   if (request.method === "POST" && path === "/api/owner/email/test") {
     return handleOwnerEmailTest(request, env);
+  }
+  if (["GET", "PUT", "POST"].includes(request.method) && path === "/api/owner/alexa-oauth") {
+    return handleOwnerAlexaOauth(request, env);
   }
   // Sign-in owned by this app. Unauthenticated by nature, so these sit above
   // the block below that requires an account.
