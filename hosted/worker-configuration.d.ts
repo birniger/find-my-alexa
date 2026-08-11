@@ -21,6 +21,8 @@ interface Env {
   MY_BUILDS_STATUS_TOKEN: string;
   /** The admin host's token. Stands in for the owner; see adminHostAuthorized. */
   ADMIN_PANEL_TOKEN: string;
+  /** Where /admin now lives. Empty disables the redirect. */
+  ADMIN_HOST_URL: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;

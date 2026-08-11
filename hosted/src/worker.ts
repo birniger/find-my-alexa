@@ -2170,6 +2170,16 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     }
     throw new HttpError(404, "API route not found.");
   }
+  // The owner console lives on its own hostname behind Cloudflare Access now.
+  // Anyone arriving at the old address gets sent there rather than shown a
+  // second copy of it — a redirect, not a 404, because this is a URL people
+  // have bookmarked. The API above still answers, so the admin host can proxy
+  // through to it.
+  // Not when the admin host is the one asking: it proxies this exact path, so
+  // redirecting it would bounce the browser between the two hosts forever.
+  if (path === "/admin" && env.ADMIN_HOST_URL && !adminHostAuthorized(request, env)) {
+    return Response.redirect(`${env.ADMIN_HOST_URL.replace(/\/$/, "")}/admin`, 302);
+  }
   return env.ASSETS.fetch(request);
 }
 
