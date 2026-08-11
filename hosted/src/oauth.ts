@@ -6,7 +6,7 @@
 // S256, no scopes, no implicit grant, no dynamic registration. Anything not
 // implemented cannot be got wrong.
 
-import { sha256Hex } from "./sign-in";
+import { sha256Hex } from "./sign-in.ts";
 
 const CODE_TTL_SECONDS = 5 * 60;
 const ACCESS_TTL_SECONDS = 24 * 60 * 60;
@@ -81,7 +81,7 @@ export async function issueCode(
 type CodeRow = { account_id: string; client_id: string; redirect_uri: string; code_challenge: string };
 
 /** Base64url of the SHA-256 of the verifier, per RFC 7636's S256 method. */
-async function s256(verifier: string): Promise<string> {
+export async function s256(verifier: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
   return btoa(String.fromCharCode(...new Uint8Array(digest)))
     .replaceAll("+", "-")

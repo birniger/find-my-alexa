@@ -14,7 +14,7 @@ import {
   revokeAccountTokens,
   rotateRefreshToken,
   safeEquals,
-} from "./oauth";
+} from "./oauth.ts";
 import {
   SESSION_MAX_AGE,
   TOKEN_VALID_HOURS,
@@ -26,7 +26,7 @@ import {
   redeemPasswordToken,
   sessionCookie,
   verifyPassword,
-} from "./sign-in";
+} from "./sign-in.ts";
 
 type Identity = { subject: string; accessToken: string; email?: string; displayName?: string };
 type Account = {
