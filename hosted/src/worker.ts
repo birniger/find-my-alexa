@@ -1,6 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import webpush from "web-push";
-import { WorkerMailer } from "worker-mailer";
 import {
   OAUTH_KEYS,
   accountIdFromAccessToken,
@@ -1026,6 +1025,10 @@ const escapeHtml = (value: string): string =>
 
 async function sendEmailViaSmtp(smtp: SmtpSettings, to: string, title: string, body: string): Promise<void> {
   // Port 25 is blocked outbound from Workers; 587 and 465 are the usable ones.
+  // Imported here rather than at module scope: it reaches for
+  // cloudflare:sockets on load, which only exists in the Workers runtime, and
+  // mail is sent rarely enough that the cold start is better spent elsewhere.
+  const { WorkerMailer } = await import("worker-mailer");
   const mailer = await WorkerMailer.connect({
     host: smtp.host,
     port: smtp.port,
