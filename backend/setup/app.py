@@ -304,6 +304,13 @@ def _public_failure_message(exc: Exception, reusing_session: bool = False) -> st
                 "Choose Set up devices to sign in to Apple again."
             )
         return "Apple did not accept this sign-in. Check the Apple email and password, then try again in a few minutes."
+    if type(exc).__name__ == "PyiCloudAcceptTermsException":
+        # Accepting is left to the person: pyicloud could do it, but that would
+        # agree to Apple's terms for them without their seeing them.
+        return (
+            "Apple needs you to accept its updated iCloud terms. "
+            "Sign in at icloud.com, accept them, then set up again."
+        )
     return "Apple setup could not connect. Please try again in a few minutes."
 
 
@@ -390,9 +397,14 @@ def _run_setup(message: dict[str, Any]) -> None:
             if not selected_pairs:
                 raise SetupFailed("The selected Apple devices are no longer available")
 
-            for _, device in selected_pairs:
+            # Renew-only devices were added before and not ticked this time. They
+            # get the new session below but no test sound.
+            tested_pairs = [pair for pair in selected_pairs if not pair[0].get("renewOnly")]
+            if not tested_pairs:
+                raise SetupFailed("No Apple device was selected")
+            for _, device in tested_pairs:
                 device.play_sound(subject="Device Finder setup test")
-            count = len(selected_pairs)
+            count = len(tested_pairs)
             _post_event(
                 message,
                 "test_ring_sent",

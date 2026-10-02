@@ -585,10 +585,10 @@ async function handleSetupUpdate(request: Request, env: Env, account: Account, s
   const payload = await readJson(request);
   const action = stringField(payload, "action", 80);
   const session = await env.DB.prepare(
-    "SELECT id, status, device_id, expires_at FROM setup_sessions WHERE id = ? AND account_id = ?",
+    "SELECT id, status, device_id, device_candidates_json, expires_at FROM setup_sessions WHERE id = ? AND account_id = ?",
   )
     .bind(setupId, account.id)
-    .first<{ id: string; status: string; device_id: string | null; expires_at: string }>();
+    .first<{ id: string; status: string; device_id: string | null; device_candidates_json: string; expires_at: string }>();
   if (!session) throw new HttpError(404, "Setup session not found.");
   if (new Date(session.expires_at).getTime() <= Date.now()) {
     await env.DB.prepare(
@@ -696,6 +696,29 @@ async function handleSetupUpdate(request: Request, env: Env, account: Account, s
         sessionPrefix: prefix,
       };
     });
+    // The new Apple session is good for every device on that Apple account, so
+    // devices already added from it are renewed too, not only the ones ticked
+    // for a test sound. Their rows are left as they are until the session lands,
+    // so a setup that fails cannot knock a working device back to needs_renewal.
+    const offeredCandidateIds = (() => {
+      try {
+        const candidates = JSON.parse(session.device_candidates_json || "[]") as Array<{ id?: unknown }>;
+        return new Set(candidates.flatMap((candidate) => (typeof candidate.id === "string" ? [candidate.id] : [])));
+      } catch {
+        return new Set<string>();
+      }
+    })();
+    const renewals = existing.results
+      .filter((device) => device.apple_device_hint && offeredCandidateIds.has(device.apple_device_hint))
+      .filter((device) => !selectedDevices.some((selection) => selection.deviceId === device.id))
+      .map((device) => ({
+        candidateId: device.apple_device_hint,
+        label: device.label,
+        deviceId: device.id,
+        sessionBucket: env.SESSION_BUCKET || "",
+        sessionPrefix: sessionPrefix(account.id, device.id),
+        renewOnly: true,
+      }));
     const appleId = await env.DB.prepare("SELECT apple_account_email FROM setup_sessions WHERE id = ?")
       .bind(setupId)
       .first<{ apple_account_email: string }>();
@@ -723,7 +746,7 @@ async function handleSetupUpdate(request: Request, env: Env, account: Account, s
           "UPDATE setup_sessions SET device_id = ?, selected_candidate_id = ?, selected_devices_json = ?,",
           "message = 'Apple devices selected.', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         ].join(" "),
-      ).bind(selectedDevices[0].deviceId, selectedDevices[0].candidateId, JSON.stringify(selectedDevices), setupId),
+      ).bind(selectedDevices[0].deviceId, selectedDevices[0].candidateId, JSON.stringify([...selectedDevices, ...renewals]), setupId),
     ]);
     return json({ status: "device_selected", deviceIds: selectedDevices.map((selection) => selection.deviceId) });
   }

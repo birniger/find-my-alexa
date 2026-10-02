@@ -871,8 +871,8 @@ function renderDeviceSelection(setupId, devices) {
       <p class="eyebrow">Select Apple devices</p>
       <h1>Choose every device Alexa may ring.</h1>
       <p class="lede">${newDevices.length
-        ? "Give each one a short, different Alexa name. Devices you already added are marked."
-        : "Every Apple device on this account is already set up. Select one to test or renew it."}</p>
+        ? "Give each one a short, different Alexa name. Devices you already added are marked, and this sign-in renews all of them."
+        : "Every Apple device on this account is already set up, and this sign-in renews all of them. Select one to test."}</p>
       <form id="deviceForm" class="setup-form">
         ${devices.map((device, index) => `
           <div class="choice-row${device.addedAs ? " already-added" : ""}">

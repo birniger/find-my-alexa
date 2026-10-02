@@ -58,6 +58,49 @@ class SetupWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(setup_app.SetupFailed, "cancelled or expired"):
                 setup_app._wait_for({"setupId": "old"}, "verification_code", bool)
 
+    def test_unaccepted_apple_terms_say_what_to_do(self):
+        setup_app = load_module("setup_app_terms_test_module", ROOT / "backend/setup/app.py")
+        exc = type("PyiCloudAcceptTermsException", (RuntimeError,), {})()
+        message = setup_app._public_failure_message(exc)
+        self.assertIn("accept its updated iCloud terms", message)
+        self.assertIn("icloud.com", message)
+
+    def test_devices_added_before_get_the_new_session_without_a_test_sound(self):
+        setup_app = load_module("setup_app_renew_test_module", ROOT / "backend/setup/app.py")
+
+        def apple_device(apple_id):
+            device = Mock()
+            device.status.return_value = {"name": apple_id, "deviceDisplayName": "iPhone"}
+            device.data = {"id": apple_id}
+            return device
+
+        ticked, untouched = apple_device("ticked-phone"), apple_device("added-before")
+        api = types.SimpleNamespace(requires_2fa=False, devices=[ticked, untouched])
+        selections = [
+            {"candidateId": setup_app._candidate_id(ticked), "deviceId": "device-1"},
+            {"candidateId": setup_app._candidate_id(untouched), "deviceId": "device-2", "renewOnly": True},
+        ]
+
+        def wait_for(_message, key, _predicate):
+            return json.dumps(selections) if key == "selected_devices_json" else 1
+
+        message = {"action": "setup", "setupId": "s", "mode": "reuse_session", "sessionBucket": "b", "sessionPrefix": "p"}
+        with (
+            patch.object(setup_app, "_open_saved_session", return_value=api),
+            patch.object(setup_app, "_wait_for", side_effect=wait_for),
+            patch.object(setup_app, "_upload_session") as upload_session,
+            patch.object(setup_app, "_post_event") as post_event,
+            patch.object(setup_app, "_stop_device_monitor"),
+        ):
+            setup_app._run_setup(message)
+
+        ticked.play_sound.assert_called_once()
+        untouched.play_sound.assert_not_called()
+        self.assertEqual([call.args[3] for call in upload_session.call_args_list], ["ticked-phone", "added-before"])
+        completed = post_event.call_args_list[-1]
+        self.assertEqual(completed.args[1], "completed")
+        self.assertEqual(completed.kwargs["deviceIds"], ["device-1", "device-2"])
+
     def test_runner_token_ignores_deployment_whitespace(self):
         setup_app = load_module("setup_app_token_test_module", ROOT / "backend/setup/app.py")
         with patch.dict("os.environ", {"RUNNER_API_TOKEN": "  token-with-newline\n"}):
