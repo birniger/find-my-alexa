@@ -17,11 +17,13 @@ import {
 import {
   SESSION_MAX_AGE,
   TOKEN_VALID_HOURS,
+  absentAccountHash,
   accountIdFromSession,
   createPasswordToken,
   createSession,
   destroySession,
   hashPassword,
+  needsRehash,
   redeemPasswordToken,
   sessionCookie,
   verifyPassword,
@@ -1068,6 +1070,45 @@ async function sendEmailViaSmtp(smtp: SmtpSettings, to: string, title: string, b
   }
 }
 
+const MAIL_STATUS_KEYS = ["mail_last_error", "mail_last_error_at"] as const;
+
+/**
+ * Sends, and writes down what happened where the owner will see it.
+ *
+ * The reset flow answers "sent" whether or not the mail left, because telling
+ * an unauthenticated caller otherwise would say which addresses have accounts.
+ * That is right, and it is also why a mailbox can stop working unnoticed until
+ * the day someone needs a password link. The outcome is recorded here so the
+ * mail panel can say so, rather than leaving it in a log nobody is reading.
+ *
+ * Only the reason is kept — never the recipient.
+ */
+async function sendMail(
+  env: Env,
+  smtp: SmtpSettings,
+  to: string,
+  title: string,
+  body: string,
+  context: string,
+): Promise<void> {
+  try {
+    await sendEmailViaSmtp(smtp, to, title, body);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await writeSettings(env, {
+      mail_last_error: `${context}: ${reason}`.slice(0, 500),
+      mail_last_error_at: new Date().toISOString(),
+    }).catch(() => undefined);
+    throw error;
+  }
+  // Cleared only when there is something to clear, so the ordinary case is a
+  // read rather than a write.
+  const stored = await readSettings(env, ["mail_last_error"]);
+  if (stored.mail_last_error) {
+    await writeSettings(env, { mail_last_error: "", mail_last_error_at: "" }).catch(() => undefined);
+  }
+}
+
 async function sendEmailNotification(env: Env, email: string, title: string, body: string): Promise<boolean> {
   const smtp = await smtpSettings(env);
   if (!smtp) return false;
@@ -1086,7 +1127,7 @@ async function sendEmailNotification(env: Env, email: string, title: string, bod
     "You are getting this because a notification could not reach your devices.",
   ].join("\n");
   try {
-    await sendEmailViaSmtp(smtp, email, title, letter);
+    await sendMail(env, smtp, email, title, letter, "Notification email");
     return true;
   } catch (error) {
     console.error("SMTP delivery failed", error instanceof Error ? error.message : error);
@@ -1297,10 +1338,28 @@ async function handleOwnerPushUnsubscribe(request: Request, env: Env): Promise<R
   return handlePushUnsubscribe(request, env, await ownerAccount(request, env));
 }
 
-// A hash of a throwaway password, used to spend the same work on an unknown
-// address as on a real one. Without it, a fast rejection says "no account here".
-const ABSENT_ACCOUNT_HASH =
-  "pbkdf2p$sha256$100000$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000";
+/**
+ * Writes a verified password back under the current pepper, when the hash it
+ * matched was made with an older one. Best-effort: a sign-in that worked must
+ * not fail because the tidy-up afterwards did.
+ */
+async function upgradeStoredPassword(
+  env: Env,
+  accountId: string,
+  password: string,
+  stored: string,
+): Promise<void> {
+  try {
+    if (!(await needsRehash(env, stored))) return;
+    await env.DB.prepare(
+      "UPDATE account_credentials SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE account_id = ?",
+    )
+      .bind(await hashPassword(env, password), accountId)
+      .run();
+  } catch (error) {
+    console.error("Could not re-write password hash under the current pepper", error instanceof Error ? error.message : error);
+  }
+}
 
 function signedInResponse(value: string, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
@@ -1325,11 +1384,12 @@ async function handleSignIn(request: Request, env: Env): Promise<Response> {
     .bind(email)
     .first<{ id: string; password_hash: string }>();
 
-  const matched = await verifyPassword(env, password, row?.password_hash ?? ABSENT_ACCOUNT_HASH);
+  const matched = await verifyPassword(env, password, row?.password_hash ?? (await absentAccountHash(env)));
   // One answer for both failures: whether an address has an account is not
   // something an unauthenticated caller gets to learn.
   if (!row || !matched) throw new HttpError(401, "That email and password do not match.");
 
+  await upgradeStoredPassword(env, row.id, password, row.password_hash);
   const value = await createSession(env, row.id, request.headers.get("user-agent") ?? "");
   return signedInResponse(value, { status: "signed_in" });
 }
@@ -1397,11 +1457,13 @@ async function sendPasswordLink(
         "You are getting this because someone asked to reset this account's password.",
       ];
   try {
-    await sendEmailViaSmtp(
+    await sendMail(
+      env,
       smtp,
       account.email,
       purpose === "set" ? "Your new Device Finder sign-in" : "Reset your Device Finder password",
       body.join("\n"),
+      purpose === "set" ? "Sign-in email" : "Password reset link",
     );
   } catch (error) {
     console.error("Password link delivery failed", error instanceof Error ? error.message : error);
@@ -1584,8 +1646,9 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
       )
         .bind(email)
         .first<{ id: string; password_hash: string }>();
-      const matched = await verifyPassword(env, password, row?.password_hash ?? ABSENT_ACCOUNT_HASH);
+      const matched = await verifyPassword(env, password, row?.password_hash ?? (await absentAccountHash(env)));
       if (row && matched) {
+        await upgradeStoredPassword(env, row.id, password, row.password_hash);
         const value = await createSession(env, row.id, request.headers.get("user-agent") ?? "");
         // Typing your own password into this form is itself the deliberate act
         // that a separate Connect press exists to capture, so asking for both
@@ -1721,7 +1784,7 @@ async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Res
   await requireOwnerOrPanel(request, env);
 
   if (request.method === "GET") {
-    const stored = await readSettings(env, SMTP_KEYS);
+    const stored = await readSettings(env, [...SMTP_KEYS, ...MAIL_STATUS_KEYS]);
     return json({
       host: stored.smtp_host ?? "",
       port: stored.smtp_port ?? "",
@@ -1731,6 +1794,9 @@ async function handleOwnerEmailSettings(request: Request, env: Env): Promise<Res
       secure: stored.smtp_secure !== "0",
       // Reports only that a password is on file. The value is never returned.
       passwordSet: Boolean(stored.smtp_password),
+      // The last send that failed, if the one after it has not yet succeeded.
+      lastError: stored.mail_last_error ?? "",
+      lastErrorAt: stored.mail_last_error_at ?? "",
     });
   }
 
@@ -1826,7 +1892,8 @@ async function handleOwnerEmailTest(request: Request, env: Env): Promise<Respons
   if (!to.includes("@")) throw new HttpError(400, "A valid recipient address is required.");
 
   try {
-    await sendEmailViaSmtp(
+    await sendMail(
+      env,
       smtp,
       to,
       "Device Finder test email",
@@ -1839,6 +1906,7 @@ async function handleOwnerEmailTest(request: Request, env: Env): Promise<Respons
         "",
         "Nothing else to do. You sent this from the Device Finder admin page.",
       ].join("\n"),
+      "Test email",
     );
   } catch (error) {
     // The mail server's own words are the whole point of a test button.
@@ -1968,7 +2036,9 @@ async function handleRunnerEvent(request: Request, env: Env, ctx: ExecutionConte
       .bind(jobStatus, message || status, jobId)
       .run();
   }
-  if (accountId && deviceId && status === "healthy") {
+  // A successful ring proves the same Apple session and device path as the
+  // health check. Clear a warning left by an earlier delivery attempt too.
+  if (accountId && deviceId && runnerSucceeded) {
     await env.DB.batch([
       env.DB.prepare(
         [

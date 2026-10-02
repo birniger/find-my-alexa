@@ -193,17 +193,20 @@ function renderSignedOut() {
         </form>
         <p id="passwordSignInStatus" class="form-status"></p>
         <button id="forgotPassword" class="text-button" type="button">Forgotten your password?</button>
-        <div class="gate-divider"><span>or</span></div>
-        <button id="signIn" class="secondary" type="button">Use the old sign-in</button>
       </div>
     </section>
   `;
-  document.querySelector("#signIn")?.addEventListener("click", () => void authClient.loginWithRedirect({
-    authorizationParams: {
-      connection: config.auth0Connection,
-      prompt: "login",
-    },
-  }));
+  // The Auth0 button that stood here is gone. Auth0 sends people back to
+  // whatever origin the app is served from, and that origin changed when
+  // Device Finder moved hostname — the old one is the only address Auth0 will
+  // return to, so pressing it reached an Auth0 error page rather than a sign-in
+  // and read as the whole app being broken.
+  //
+  // Only the way in is withdrawn, not the migration window: requireAccount
+  // still accepts an Auth0 token, so a session started before this keeps
+  // working and can still be signed out below. To offer the route again, add
+  // this app's current origin to the Auth0 application's allowed callback URLs
+  // and restore the button.
   bindPasswordSignIn();
 }
 
@@ -427,6 +430,20 @@ async function renderMailSettings() {
         <button id="mailTest" class="secondary" type="button">Send test</button>
       </div>
     </form>`;
+
+  // A password reset always answers "sent", so that a stranger cannot learn
+  // which addresses have accounts. This is where the truth gets told instead.
+  if (settings.lastError) {
+    const when = settings.lastErrorAt ? new Date(settings.lastErrorAt) : null;
+    const stamp = when && !Number.isNaN(when.valueOf())
+      ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+      : "";
+    settingsStatus(
+      "#mailStatus",
+      `The last email did not send${stamp ? ` (${stamp})` : ""} — ${settings.lastError}. Fix the settings and send a test.`,
+      "error",
+    );
+  }
 
   document.querySelector("#mailForm").addEventListener("submit", async (event) => {
     event.preventDefault();

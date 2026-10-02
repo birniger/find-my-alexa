@@ -23,6 +23,16 @@ interface Env {
   ADMIN_PANEL_TOKEN: string;
   /** Where /admin now lives. Empty disables the redirect. */
   ADMIN_HOST_URL: string;
+  /** Encrypts the stored mail password. See PASSWORD_PEPPER before rotating. */
+  SETTINGS_KEY?: string;
+  /**
+   * Peppers stored passwords. Separate from SETTINGS_KEY so that rotating the
+   * settings key no longer invalidates every password in the database; unset,
+   * SETTINGS_KEY is still used, so existing hashes need no migration.
+   */
+  PASSWORD_PEPPER?: string;
+  /** The outgoing pepper during a rotation. Old hashes verify and re-write. */
+  PASSWORD_PEPPER_PREVIOUS?: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;

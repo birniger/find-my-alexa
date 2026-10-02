@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -22,6 +23,10 @@ class WorkerOperationError(RuntimeError):
 
 class WorkerOperationDeadline(RuntimeError):
     """The Apple operation exceeded its application-level deadline."""
+
+
+MAX_RECEIVE_COUNT = 2
+PASSWORD_RETRY_DELAY_SECONDS = 2.0
 
 
 def _failure_category(exc: Exception) -> str:
@@ -149,6 +154,14 @@ def _post_runner_event(message: dict[str, Any], status: str, detail: str = "") -
         print("Find My worker warning: callback_failed")
 
 
+def _receive_count(record: dict[str, Any]) -> int:
+    """Return the SQS delivery attempt, defaulting safely for direct tests."""
+    try:
+        return max(1, int(record.get("attributes", {}).get("ApproximateReceiveCount", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
 @contextlib.contextmanager
 def _operation_deadline(
     context: Any,
@@ -184,7 +197,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if len(records) != 1:
         raise ValueError("Expected exactly one SQS record")
 
-    message = json.loads(records[0]["body"])
+    record = records[0]
+    message = json.loads(record["body"])
     action = message.get("action")
     if action not in {"ring", "health_check"}:
         raise ValueError("Unsupported action")
@@ -217,9 +231,19 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 if not password:
                     raise
                 print("Find My worker: retrying with the stored Apple password")
-                _run_operation(
-                    action, apple_id, device_name, session_directory, password
-                )
+                try:
+                    _run_operation(
+                        action, apple_id, device_name, session_directory, password
+                    )
+                except ReauthenticationRequired:
+                    # Apple occasionally rejects the first trust-token refresh
+                    # and accepts the same session moments later. Retry here so
+                    # a phone does not wait for SQS's five-minute redelivery.
+                    time.sleep(PASSWORD_RETRY_DELAY_SECONDS)
+                    print("Find My worker: retrying the stored Apple password once")
+                    _run_operation(
+                        action, apple_id, device_name, session_directory, password
+                    )
 
         # Persist refreshed cookies after a successful operation. Failure here
         # is logged but must not cause SQS to retry and ring the phone twice.
@@ -235,8 +259,18 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         # IDs, device IDs, cookies, passwords, or locations, and the setup
         # worker already logs failures this way.
         print(f"Find My worker failed: {category} ({type(exc).__name__})")
-        _post_runner_event(message, category, category)
-        if action == "health_check" and category == "reauthentication_required":
+        final_attempt = _receive_count(record) >= MAX_RECEIVE_COUNT
+        if not final_attempt:
+            # SQS will try again. Do not tell the person the device is broken
+            # while that recovery attempt is still pending.
+            _post_runner_event(message, "running", "retrying")
+        else:
+            _post_runner_event(message, category, category)
+        if (
+            final_attempt
+            and action == "health_check"
+            and category == "reauthentication_required"
+        ):
             return {"processed": 1}
         raise WorkerOperationError(f"Find My worker failed: {category}") from None
     finally:

@@ -465,6 +465,149 @@ class SessionStoreTests(unittest.TestCase):
 
 
 class WorkerHandlerTests(unittest.TestCase):
+    def _load_reauthentication_worker(self, module_name):
+        find_my_module = types.ModuleType("find_my")
+        reauthentication_required = type(
+            "ReauthenticationRequired", (RuntimeError,), {}
+        )
+        find_my_module.ring_device = Mock(side_effect=reauthentication_required())
+        find_my_module.check_device = Mock(side_effect=reauthentication_required())
+        find_my_module.DeviceNotFound = type("DeviceNotFound", (RuntimeError,), {})
+        find_my_module.ReauthenticationRequired = reauthentication_required
+
+        store = Mock()
+        store.download.return_value = Path("/tmp/find-my-alexa-session")
+        session_store_module = types.ModuleType("session_store")
+        session_store_module.S3SessionStore = Mock(return_value=store)
+        session_store_module.SessionStoreError = type(
+            "SessionStoreError", (RuntimeError,), {}
+        )
+        with patch.dict(
+            sys.modules,
+            {"find_my": find_my_module, "session_store": session_store_module},
+        ):
+            worker_app = load_module(module_name, ROOT / "backend/worker/app.py")
+        return worker_app
+
+    @staticmethod
+    def _queue_event(action, receive_count):
+        return {
+            "Records": [
+                {
+                    "attributes": {"ApproximateReceiveCount": str(receive_count)},
+                    "body": json.dumps({"action": action}),
+                }
+            ]
+        }
+
+    def test_first_queue_failure_stays_in_progress_without_alerting(self):
+        worker_app = self._load_reauthentication_worker(
+            "worker_app_first_retry_test_module"
+        )
+        environment = {
+            "APPLE_ID": "basil@example.com",
+            "DEVICE_NAME": "Basil's iPhone",
+            "SESSION_BUCKET": "bucket",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(worker_app, "_post_runner_event") as post_event,
+            self.assertRaises(worker_app.WorkerOperationError),
+        ):
+            worker_app.lambda_handler(self._queue_event("ring", 1), None)
+        post_event.assert_called_once_with(
+            unittest.mock.ANY, "running", "retrying"
+        )
+
+    def test_transient_password_rejection_retries_without_waiting_for_sqs(self):
+        worker_app = self._load_reauthentication_worker(
+            "worker_app_prompt_retry_test_module"
+        )
+        reauthentication_required = worker_app.ReauthenticationRequired
+        worker_app.ring_device.side_effect = [
+            reauthentication_required(),
+            reauthentication_required(),
+            None,
+        ]
+        event = self._queue_event("ring", 1)
+        event["Records"][0]["body"] = json.dumps(
+            {
+                "action": "ring",
+                "accountId": "account-1",
+                "storedApplePassword": True,
+            }
+        )
+        environment = {
+            "APPLE_ID": "basil@example.com",
+            "DEVICE_NAME": "Basil's iPhone",
+            "SESSION_BUCKET": "bucket",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(worker_app, "_stored_password", return_value="secret"),
+            patch.object(worker_app.time, "sleep") as sleep,
+            patch.object(worker_app, "_post_runner_event") as post_event,
+        ):
+            response = worker_app.lambda_handler(event, None)
+
+        self.assertEqual(response, {"processed": 1})
+        self.assertEqual(worker_app.ring_device.call_count, 3)
+        sleep.assert_called_once_with(worker_app.PASSWORD_RETRY_DELAY_SECONDS)
+        post_event.assert_called_once_with(unittest.mock.ANY, "succeeded")
+
+    def test_final_queue_failure_sends_reauthentication_alert(self):
+        worker_app = self._load_reauthentication_worker(
+            "worker_app_final_retry_test_module"
+        )
+        environment = {
+            "APPLE_ID": "basil@example.com",
+            "DEVICE_NAME": "Basil's iPhone",
+            "SESSION_BUCKET": "bucket",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(worker_app, "_post_runner_event") as post_event,
+            self.assertRaises(worker_app.WorkerOperationError),
+        ):
+            worker_app.lambda_handler(self._queue_event("ring", 2), None)
+        post_event.assert_called_once_with(
+            unittest.mock.ANY,
+            "reauthentication_required",
+            "reauthentication_required",
+        )
+
+    def test_health_check_retries_before_reporting_terminal_reauthentication(self):
+        worker_app = self._load_reauthentication_worker(
+            "worker_app_health_retry_test_module"
+        )
+        environment = {
+            "APPLE_ID": "basil@example.com",
+            "DEVICE_NAME": "Basil's iPhone",
+            "SESSION_BUCKET": "bucket",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            with (
+                patch.object(worker_app, "_post_runner_event") as first_post,
+                self.assertRaises(worker_app.WorkerOperationError),
+            ):
+                worker_app.lambda_handler(
+                    self._queue_event("health_check", 1), None
+                )
+            first_post.assert_called_once_with(
+                unittest.mock.ANY, "running", "retrying"
+            )
+
+            with patch.object(worker_app, "_post_runner_event") as final_post:
+                response = worker_app.lambda_handler(
+                    self._queue_event("health_check", 2), None
+                )
+            self.assertEqual(response, {"processed": 1})
+            final_post.assert_called_once_with(
+                unittest.mock.ANY,
+                "reauthentication_required",
+                "reauthentication_required",
+            )
+
     def test_cleanup_runs_when_ring_fails(self):
         find_my_module = types.ModuleType("find_my")
         find_my_module.ring_device = Mock(side_effect=RuntimeError("ring failed"))
