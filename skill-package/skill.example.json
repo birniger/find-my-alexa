@@ -5,13 +5,13 @@
     "publishingInformation": {
       "locales": {
         "en-GB": {
-          "name": "Basil Phone Finder",
-          "summary": "Privately rings Basil's iPhone using Find My.",
-          "description": "A personal development skill that asks Apple's Find My service to play a sound on Basil's iPhone.",
+          "name": "Device Finder",
+          "summary": "Privately rings your linked Apple devices using Apple Find My.",
+          "description": "A private beta skill that asks Apple Find My to play a sound on the linked user's own Apple devices.",
           "examplePhrases": [
-            "Alexa, open Basil Phone Finder",
-            "Alexa, ask Basil Phone Finder to ring the phone",
-            "Alexa, ask Basil Phone Finder where Basil's phone is"
+            "Alexa, open Device Finder",
+            "Alexa, ask Device Finder to ring my phone",
+            "Alexa, ask Device Finder where my iPad is"
           ],
           "keywords": [
             "private",
@@ -20,13 +20,13 @@
           ]
         },
         "en-US": {
-          "name": "Basil Phone Finder",
-          "summary": "Privately rings Basil's iPhone using Find My.",
-          "description": "A personal development skill that asks Apple's Find My service to play a sound on Basil's iPhone.",
+          "name": "Device Finder",
+          "summary": "Privately rings your linked Apple devices using Apple Find My.",
+          "description": "A private beta skill that asks Apple Find My to play a sound on the linked user's own Apple devices.",
           "examplePhrases": [
-            "Alexa, open Basil Phone Finder",
-            "Alexa, ask Basil Phone Finder to ring the phone",
-            "Alexa, ask Basil Phone Finder where Basil's phone is"
+            "Alexa, open Device Finder",
+            "Alexa, ask Device Finder to ring my phone",
+            "Alexa, ask Device Finder where my iPad is"
           ],
           "keywords": [
             "private",

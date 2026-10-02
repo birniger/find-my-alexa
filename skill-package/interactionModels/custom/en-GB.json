@@ -1,17 +1,33 @@
 {
   "interactionModel": {
     "languageModel": {
-      "invocationName": "basil phone finder",
+      "invocationName": "device finder",
       "intents": [
         {
           "name": "RingPhoneIntent",
+          "slots": [
+            {
+              "name": "deviceName",
+              "type": "DEVICE_NAME"
+            }
+          ],
           "samples": [
+            "ring {deviceName}",
+            "find {deviceName}",
+            "where is {deviceName}",
             "ring the phone",
-            "ring Basil's phone",
+            "ring my phone",
+            "ring my iPhone",
+            "ring my iPad",
+            "ring my Mac",
             "find the phone",
-            "find Basil's phone",
+            "find my phone",
+            "find my iPhone",
+            "find my iPad",
             "where is the phone",
-            "where is Basil's phone"
+            "where is my phone",
+            "where is my iPhone",
+            "where is my iPad"
           ]
         },
         {
@@ -25,6 +41,53 @@
         {
           "name": "AMAZON.StopIntent",
           "samples": []
+        }
+      ],
+      "types": [
+        {
+          "name": "DEVICE_NAME",
+          "values": [
+            {
+              "name": {
+                "value": "my iPhone"
+              }
+            },
+            {
+              "name": {
+                "value": "my iPad"
+              }
+            },
+            {
+              "name": {
+                "value": "my Mac"
+              }
+            },
+            {
+              "name": {
+                "value": "my watch"
+              }
+            },
+            {
+              "name": {
+                "value": "my AirPods"
+              }
+            },
+            {
+              "name": {
+                "value": "work phone"
+              }
+            },
+            {
+              "name": {
+                "value": "personal phone"
+              }
+            },
+            {
+              "name": {
+                "value": "bedroom phone"
+              }
+            }
+          ]
         }
       ]
     }

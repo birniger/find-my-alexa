@@ -26,6 +26,12 @@ jobs:
         run: sam validate --lint --template-file template.yaml
       - name: Build deployable artifacts
         run: sam build --template-file template.yaml
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: "24"
+      - name: Test the hosted app
+        working-directory: hosted
+        run: npm ci && npm test
       - name: Validate JSON files
         run: |
           python -m json.tool skill-package/skill.example.json >/dev/null

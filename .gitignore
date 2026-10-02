@@ -1,4 +1,12 @@
 .aws-sam/
+.wrangler/
+hosted/.wrangler/
+hosted/wrangler.jsonc
+hosted/node_modules/
+hosted/worker-dist/
+admin/.wrangler/
+admin/node_modules/
+admin/worker-dist/
 .pytest_cache/
 __pycache__/
 *.py[cod]
@@ -13,3 +21,5 @@ target.json
 session-bundle.zip
 samconfig.toml
 /skill-package/skill.json
+redirect/.wrangler/
+redirect/node_modules/

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -50,6 +51,44 @@ def _stop_device_monitor(manager: Any) -> None:
             raise MonitorShutdownError("The Find My background monitor did not stop")
 
 
+@contextlib.contextmanager
+def _apple_failures():
+    """Map pyicloud's own exceptions onto this module's categories.
+
+    Everything below happens inside pyicloud, before this module can compare a
+    name or an ID, so without translation these arrive at the worker as the
+    uninformative catch-all category. Classes are matched by name so this
+    module still never imports pyicloud at module scope.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001
+        name = type(exc).__name__
+        if name in ("PyiCloud2FARequiredException", "PyiCloud2SARequiredException"):
+            # Reached only when a stored password got past the login but the
+            # trust token has also expired. Only a person can answer this.
+            raise ReauthenticationRequired(
+                "Apple wants a new verification code"
+            ) from exc
+        if name == "PyiCloudFailedLoginException":
+            # Find My rejected the restored session, so pyicloud tried to log in
+            # again and found no password. The worker deliberately stores none,
+            # so this always means the saved session is no longer trusted for
+            # Find My even though the general iCloud token still validates.
+            raise ReauthenticationRequired(
+                "The saved iCloud session is no longer trusted for Find My"
+            ) from exc
+        if name == "PyiCloudNoDevicesException":
+            raise DeviceNotFound("Find My returned no devices for this session") from exc
+        raise
+
+
+def _open_device_manager(api: Any) -> Any:
+    """Open Find My with pyicloud's failures translated."""
+    with _apple_failures():
+        return api.devices
+
+
 def _normalise_name(value: str) -> str:
     value = value.replace("’", "'").replace("‘", "'").replace("ʼ", "'")
     return re.sub(r"\s+", " ", value).strip().casefold()
@@ -69,11 +108,33 @@ def _configured_device_id(session_directory: Path) -> str | None:
     return device_id
 
 
-def ring_device(apple_id: str, target_name: str, session_directory: Path) -> None:
-    """Validate the cached session and ring the exact configured device.
+def _matching_devices(devices: list[Any], target_name: str, session_directory: Path) -> list[Any]:
+    target_id = _configured_device_id(session_directory)
+    if target_id:
+        return [
+            device
+            for device in devices
+            if str(device.data.get("id") or "") == target_id
+        ]
 
-    Authentication is intentionally disabled. If the cached token has expired,
-    the worker fails instead of attempting a login with a password stored in AWS.
+    # Backward-compatible fallback for sessions created before target.json.
+    wanted = _normalise_name(target_name)
+    matches = []
+    for device in devices:
+        name = str(device.status().get("name") or "")
+        if _normalise_name(name) == wanted:
+            matches.append(device)
+    return matches
+
+
+def _open_api(apple_id: str, session_directory: Path, password: str | None = None) -> Any:
+    """Open a usable pyicloud session, recovering with a password if one is held.
+
+    Without a password, authentication stays disabled: an expired session
+    surfaces as a renewal prompt rather than a silent login. With one, the
+    trust token Apple issued during setup lets this recover unattended,
+    because pyicloud sends that token alongside the password and Apple then
+    skips the verification code.
     """
     # Third-party diagnostics can contain account or HTTP response details.
     logging.getLogger("pyicloud").setLevel(logging.CRITICAL)
@@ -82,43 +143,77 @@ def ring_device(apple_id: str, target_name: str, session_directory: Path) -> Non
 
     api = PyiCloudService(
         apple_id,
-        password=None,
+        password=password or None,
         cookie_directory=str(session_directory),
         with_family=False,
         authenticate=False,
     )
     _install_http_timeout(api)
     auth_status = api.get_auth_status()
-    if not auth_status.get("authenticated") or auth_status.get("requires_2fa"):
+    if auth_status.get("authenticated") and not auth_status.get("requires_2fa"):
+        return api
+    if not password:
         raise ReauthenticationRequired(
-            "The iCloud session expired; rerun scripts/authenticate.py"
+            "The iCloud session expired; renew the Apple setup"
         )
 
-    manager = api.devices
+    with _apple_failures():
+        api.authenticate()
+    if getattr(api, "requires_2fa", False):
+        raise ReauthenticationRequired(
+            "Apple wants a new verification code; renew the Apple setup"
+        )
+    return api
+
+
+def check_device(
+    apple_id: str,
+    target_name: str,
+    session_directory: Path,
+    password: str | None = None,
+) -> None:
+    """Validate that the cached session can still see the configured device."""
+    api = _open_api(apple_id, session_directory, password)
+
+    manager = _open_device_manager(api)
     try:
-        devices = list(manager)
-        target_id = _configured_device_id(session_directory)
-        if target_id:
-            matches = [
-                device
-                for device in devices
-                if str(device.data.get("id") or "") == target_id
-            ]
-        else:
-            # Backward-compatible fallback for sessions created before target.json.
-            wanted = _normalise_name(target_name)
-            matches = []
-            for device in devices:
-                name = str(device.status().get("name") or "")
-                if _normalise_name(name) == wanted:
-                    matches.append(device)
+        with _apple_failures():
+            devices = list(manager)
+        if len(_matching_devices(devices, target_name, session_directory)) != 1:
+            raise DeviceNotFound(
+                "The configured Find My device was not returned exactly once"
+            )
+    finally:
+        _stop_device_monitor(manager)
+
+
+def ring_device(
+    apple_id: str,
+    target_name: str,
+    session_directory: Path,
+    password: str | None = None,
+) -> None:
+    """Validate the cached session and ring the exact configured device.
+
+    A password is used only when the account opted into storing one. Without
+    it the worker fails rather than logging in, so an expired session asks a
+    person to renew instead of using a credential it was never given.
+    """
+    api = _open_api(apple_id, session_directory, password)
+
+    manager = _open_device_manager(api)
+    try:
+        with _apple_failures():
+            devices = list(manager)
+        matches = _matching_devices(devices, target_name, session_directory)
 
         if len(matches) != 1:
             raise DeviceNotFound(
                 "The configured Find My device was not returned exactly once"
             )
 
-        matches[0].play_sound(subject="Find My alert requested through Alexa")
+        with _apple_failures():
+            matches[0].play_sound(subject="Find My alert requested through Alexa")
     finally:
         # Device properties can restart pyicloud's daemon monitor, so stop and
         # join it only after every Find My operation has finished.
